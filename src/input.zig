@@ -10,10 +10,25 @@ const KEYMAP_COMPILE_NO_FLAGS: xkb.enum_xkb_keymap_compile_flags = @intCast(xkb.
 const KEY_DOWN: xkb.enum_xkb_key_direction = @intCast(xkb.XKB_KEY_DOWN);
 const KEY_UP: xkb.enum_xkb_key_direction = @intCast(xkb.XKB_KEY_UP);
 
+/// USB HID usage page 0x07 (Keyboard/Keypad). Flutter's `physical` key IDs are
+/// full USB HID usage codes (`page << 16 | usage`), e.g. keyA = 0x00070004.
+/// See `FlutterKeyEvent.physical` in flutter_embedder.h and
+/// `PhysicalKeyboardKey` in the framework's keyboard_key.g.dart.
+const HID_KEYBOARD_PAGE: u64 = 0x00070000;
+
+/// Flutter logical key ID planes. A logical key ID is `plane | value`; see
+/// `LogicalKeyboardKey` in the framework's keyboard_key.g.dart for the
+/// authoritative definitions.
+const LOGICAL_UNICODE_PLANE: u64 = 0x00000000000;
+const LOGICAL_UNPRINTABLE_PLANE: u64 = 0x00100000000;
+const LOGICAL_FLUTTER_PLANE: u64 = 0x00200000000;
+const LOGICAL_GTK_PLANE: u64 = 0x01500000000;
+
 /// Linux (evdev) keycodes to USB HID usage values. See
 /// linux/input-event-codes.h and the USB HID Usage Tables (keyboard page).
 /// Linux keycodes follow the AT scan-code layout, not alphabetical order.
-fn evdevToHid(code: u32) u64 {
+const hid_by_evdev: [256]u8 = blk: {
+    var t: [256]u8 = @splat(0);
     const map = [_]struct { evdev: u32, hid: u64 }{
         .{ .evdev = 16, .hid = 20 }, // q
         .{ .evdev = 17, .hid = 26 }, // w
@@ -101,53 +116,51 @@ fn evdevToHid(code: u32) u64 {
         .{ .evdev = 69, .hid = 83 }, // numlock
         .{ .evdev = 70, .hid = 71 }, // scrolllock
     };
-    for (map) |entry| {
-        if (entry.evdev == code) return entry.hid;
-    }
-    return 0;
-}
+    for (map) |e| t[e.evdev] = e.hid;
+    break :blk t;
+};
 
 /// Map a level-0 (unshifted) XKB keysym to a Flutter logical key ID.
 fn keysymToLogical(keysym: u32) u64 {
-    if (keysym >= 0x20 and keysym <= 0x7e) return keysym;
-    if (keysym >= 0xa0 and keysym <= 0xff) return keysym;
+    if (keysym >= 0x20 and keysym <= 0x7e) return LOGICAL_UNICODE_PLANE | keysym;
+    if (keysym >= 0xa0 and keysym <= 0xff) return LOGICAL_UNICODE_PLANE | keysym;
     return switch (keysym) {
-        @intCast(xkb.XKB_KEY_Return) => 0x0010000000d,
-        @intCast(xkb.XKB_KEY_Escape) => 0x0010000001b,
-        @intCast(xkb.XKB_KEY_BackSpace) => 0x00100000008,
-        @intCast(xkb.XKB_KEY_Tab) => 0x00100000009,
-        @intCast(xkb.XKB_KEY_Delete) => 0x0010000007f,
-        @intCast(xkb.XKB_KEY_Insert) => 0x00100000407,
-        @intCast(xkb.XKB_KEY_Home) => 0x00100000306,
-        @intCast(xkb.XKB_KEY_End) => 0x00100000305,
-        @intCast(xkb.XKB_KEY_Page_Up) => 0x00100000308,
-        @intCast(xkb.XKB_KEY_Page_Down) => 0x00100000307,
-        @intCast(xkb.XKB_KEY_Up) => 0x00100000304,
-        @intCast(xkb.XKB_KEY_Down) => 0x00100000301,
-        @intCast(xkb.XKB_KEY_Left) => 0x00100000302,
-        @intCast(xkb.XKB_KEY_Right) => 0x00100000303,
-        @intCast(xkb.XKB_KEY_Shift_L) => 0x00200000102,
-        @intCast(xkb.XKB_KEY_Shift_R) => 0x00200000103,
-        @intCast(xkb.XKB_KEY_Control_L) => 0x00200000100,
-        @intCast(xkb.XKB_KEY_Control_R) => 0x00200000101,
-        @intCast(xkb.XKB_KEY_Alt_L) => 0x00200000104,
-        @intCast(xkb.XKB_KEY_Alt_R) => 0x00200000105,
-        @intCast(xkb.XKB_KEY_Super_L) => 0x00200000106,
-        @intCast(xkb.XKB_KEY_Super_R) => 0x00200000107,
-        @intCast(xkb.XKB_KEY_Caps_Lock) => 0x00100000104,
-        @intCast(xkb.XKB_KEY_F1) => 0x00100000801,
-        @intCast(xkb.XKB_KEY_F2) => 0x00100000802,
-        @intCast(xkb.XKB_KEY_F3) => 0x00100000803,
-        @intCast(xkb.XKB_KEY_F4) => 0x00100000804,
-        @intCast(xkb.XKB_KEY_F5) => 0x00100000805,
-        @intCast(xkb.XKB_KEY_F6) => 0x00100000806,
-        @intCast(xkb.XKB_KEY_F7) => 0x00100000807,
-        @intCast(xkb.XKB_KEY_F8) => 0x00100000808,
-        @intCast(xkb.XKB_KEY_F9) => 0x00100000809,
-        @intCast(xkb.XKB_KEY_F10) => 0x0010000080a,
-        @intCast(xkb.XKB_KEY_F11) => 0x0010000080b,
-        @intCast(xkb.XKB_KEY_F12) => 0x0010000080c,
-        else => 0x01500000000 | @as(u64, keysym),
+        @intCast(xkb.XKB_KEY_Return) => LOGICAL_UNPRINTABLE_PLANE | 0x00d,
+        @intCast(xkb.XKB_KEY_Escape) => LOGICAL_UNPRINTABLE_PLANE | 0x01b,
+        @intCast(xkb.XKB_KEY_BackSpace) => LOGICAL_UNPRINTABLE_PLANE | 0x008,
+        @intCast(xkb.XKB_KEY_Tab) => LOGICAL_UNPRINTABLE_PLANE | 0x009,
+        @intCast(xkb.XKB_KEY_Delete) => LOGICAL_UNPRINTABLE_PLANE | 0x07f,
+        @intCast(xkb.XKB_KEY_Insert) => LOGICAL_UNPRINTABLE_PLANE | 0x407,
+        @intCast(xkb.XKB_KEY_Home) => LOGICAL_UNPRINTABLE_PLANE | 0x306,
+        @intCast(xkb.XKB_KEY_End) => LOGICAL_UNPRINTABLE_PLANE | 0x305,
+        @intCast(xkb.XKB_KEY_Page_Up) => LOGICAL_UNPRINTABLE_PLANE | 0x308,
+        @intCast(xkb.XKB_KEY_Page_Down) => LOGICAL_UNPRINTABLE_PLANE | 0x307,
+        @intCast(xkb.XKB_KEY_Up) => LOGICAL_UNPRINTABLE_PLANE | 0x304,
+        @intCast(xkb.XKB_KEY_Down) => LOGICAL_UNPRINTABLE_PLANE | 0x301,
+        @intCast(xkb.XKB_KEY_Left) => LOGICAL_UNPRINTABLE_PLANE | 0x302,
+        @intCast(xkb.XKB_KEY_Right) => LOGICAL_UNPRINTABLE_PLANE | 0x303,
+        @intCast(xkb.XKB_KEY_Shift_L) => LOGICAL_FLUTTER_PLANE | 0x102,
+        @intCast(xkb.XKB_KEY_Shift_R) => LOGICAL_FLUTTER_PLANE | 0x103,
+        @intCast(xkb.XKB_KEY_Control_L) => LOGICAL_FLUTTER_PLANE | 0x100,
+        @intCast(xkb.XKB_KEY_Control_R) => LOGICAL_FLUTTER_PLANE | 0x101,
+        @intCast(xkb.XKB_KEY_Alt_L) => LOGICAL_FLUTTER_PLANE | 0x104,
+        @intCast(xkb.XKB_KEY_Alt_R) => LOGICAL_FLUTTER_PLANE | 0x105,
+        @intCast(xkb.XKB_KEY_Super_L) => LOGICAL_FLUTTER_PLANE | 0x106,
+        @intCast(xkb.XKB_KEY_Super_R) => LOGICAL_FLUTTER_PLANE | 0x107,
+        @intCast(xkb.XKB_KEY_Caps_Lock) => LOGICAL_UNPRINTABLE_PLANE | 0x104,
+        @intCast(xkb.XKB_KEY_F1) => LOGICAL_UNPRINTABLE_PLANE | 0x801,
+        @intCast(xkb.XKB_KEY_F2) => LOGICAL_UNPRINTABLE_PLANE | 0x802,
+        @intCast(xkb.XKB_KEY_F3) => LOGICAL_UNPRINTABLE_PLANE | 0x803,
+        @intCast(xkb.XKB_KEY_F4) => LOGICAL_UNPRINTABLE_PLANE | 0x804,
+        @intCast(xkb.XKB_KEY_F5) => LOGICAL_UNPRINTABLE_PLANE | 0x805,
+        @intCast(xkb.XKB_KEY_F6) => LOGICAL_UNPRINTABLE_PLANE | 0x806,
+        @intCast(xkb.XKB_KEY_F7) => LOGICAL_UNPRINTABLE_PLANE | 0x807,
+        @intCast(xkb.XKB_KEY_F8) => LOGICAL_UNPRINTABLE_PLANE | 0x808,
+        @intCast(xkb.XKB_KEY_F9) => LOGICAL_UNPRINTABLE_PLANE | 0x809,
+        @intCast(xkb.XKB_KEY_F10) => LOGICAL_UNPRINTABLE_PLANE | 0x80a,
+        @intCast(xkb.XKB_KEY_F11) => LOGICAL_UNPRINTABLE_PLANE | 0x80b,
+        @intCast(xkb.XKB_KEY_F12) => LOGICAL_UNPRINTABLE_PLANE | 0x80c,
+        else => LOGICAL_GTK_PLANE | keysym,
     };
 }
 
@@ -249,8 +262,8 @@ pub const Input = struct {
             .struct_size = @sizeOf(c.FlutterKeyEvent),
             .timestamp = @floatFromInt(@as(u64, time_ms) * 1000),
             .type = if (pressed) @intCast(c.kFlutterKeyEventTypeDown) else @intCast(c.kFlutterKeyEventTypeUp),
-            // Usage Page (16 bits)  | Usage ID (16 bits) 
-            .physical = 0x07 << 16 | evdevToHid(keycode - 8),
+            // Usage Page (16 bits)  | Usage ID (16 bits)
+            .physical = HID_KEYBOARD_PAGE | hid_by_evdev[keycode - 8],
             .logical = 0,
             .character = null,
             .synthesized = false,
