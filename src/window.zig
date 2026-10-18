@@ -211,7 +211,7 @@ pub const Window = struct {
                 inp.setKeymapFromBuffer(mapped);
             },
             .key => |k| {
-                inp.handleKey(k.key, k.state == .pressed, k.time);
+                inp.handleKey(k.key + 8, k.state == .pressed, k.time);
             },
             .modifiers => |m| {
                 inp.updateModifiers(m.mods_depressed, m.mods_latched, m.mods_locked, m.group);
