@@ -8,10 +8,23 @@ const window = @import("window.zig");
 const manifest = @import("manifest.zig");
 const vulkan = @import("vulkan.zig");
 const input = @import("input.zig");
+const text_input = @import("flutter/text_input.zig");
+const platform_handler = @import("flutter/platform_handler.zig");
+const platform_channel = @import("flutter/platform_channel.zig");
 
 const width = 800;
 const height = 600;
 const pixel_ratio = 1.0;
+
+/// Shared `user_data` for the engine: the Vulkan renderer callbacks need the
+/// view, while the platform message callback needs the channel registry. Both
+/// are reached from this one pointer, because the engine only takes a single
+/// `user_data`.
+const App = struct {
+    view: VulkanView,
+    engine: ?*engine.Engine = null,
+    channels: platform_channel.Registry = .{},
+};
 
 const VulkanView = struct {
     ctx: vulkan.Context,
@@ -22,7 +35,7 @@ const VulkanView = struct {
         instance: c.FlutterVulkanInstanceHandle,
         name: [*c]const u8,
     ) callconv(.c) ?*anyopaque {
-        const self: *VulkanView = @ptrCast(@alignCast(user_data));
+        const self = &(@as(*App, @ptrCast(@alignCast(user_data))).view);
         const vk_instance: vk.Instance = @ptrCast(instance);
         const name_z: [*:0]const u8 = @ptrCast(name);
         const fnptr = self.ctx.vkb.dispatch.vkGetInstanceProcAddr.?(vk_instance, name_z);
@@ -35,7 +48,7 @@ const VulkanView = struct {
         frame_info: [*c]const c.FlutterFrameInfo,
     ) callconv(.c) c.FlutterVulkanImage {
         _ = frame_info;
-        const self: *VulkanView = @ptrCast(@alignCast(user_data));
+        const self = &(@as(*App, @ptrCast(@alignCast(user_data))).view);
         const index = self.surface.acquire() catch return std.mem.zeroes(c.FlutterVulkanImage);
         const image = self.surface.images[index];
         return .{
@@ -49,7 +62,7 @@ const VulkanView = struct {
         user_data: ?*anyopaque,
         image: [*c]const c.FlutterVulkanImage,
     ) callconv(.c) bool {
-        const self: *VulkanView = @ptrCast(@alignCast(user_data));
+        const self = &(@as(*App, @ptrCast(@alignCast(user_data))).view);
         const vk_image: vk.Image = @fromBackingInt(@intCast(image.*.image));
         self.surface.present(vk_image) catch |e| {
             std.debug.print("fembed: vulkan present failed: {}\n", .{e});
@@ -81,6 +94,17 @@ const VulkanView = struct {
     }
 };
 
+/// Invoked by the engine (on the engine thread) for every platform message the
+/// framework sends to the embedder. Every message must be answered; the actual
+/// routing lives in `flutter/platform_channel.zig`.
+fn platformMessageCallback(
+    message: [*c]const c.FlutterPlatformMessage,
+    user_data: ?*anyopaque,
+) callconv(.c) void {
+    const app: *App = @ptrCast(@alignCast(user_data.?));
+    app.channels.handle(message);
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
 
@@ -93,20 +117,38 @@ pub fn main(init: std.process.Init) !void {
     var ctx = try vulkan.Context.init(allocator);
     defer ctx.deinit();
 
-    var view = VulkanView{
-        .ctx = ctx,
-        .surface = try vulkan.Surface.create(&ctx, @ptrCast(win.display), @ptrCast(win.surface), width, height),
+    var app = App{
+        .view = .{
+            .ctx = ctx,
+            .surface = try vulkan.Surface.create(&ctx, @ptrCast(win.display), @ptrCast(win.surface), width, height),
+        },
     };
-    defer view.surface.destroy();
+    defer app.view.surface.destroy();
 
-    const renderer = view.rendererConfig();
+    const renderer = app.view.rendererConfig();
 
-    var eng = try engine.Engine.init(allocator, cfg, &renderer, &view);
+    const eng = try engine.Engine.init(allocator, cfg, &renderer, &app, platformMessageCallback);
     defer eng.deinit();
+    app.engine = eng;
+    app.channels.eng = eng;
 
-    var inp = try input.Input.init(eng);
+    var ti = text_input.TextInput.init(allocator, eng);
+    defer ti.deinit();
+    app.channels.text_input = &ti;
+
+    var inp = try input.Input.init(eng, &ti);
     defer inp.deinit();
     try win.setupInput(&inp);
+
+    // `setupInput` creates the clipboard, which needs a seat to exist.
+    var ph = platform_handler.PlatformHandler{
+        .allocator = allocator,
+        .eng = eng,
+        .clipboard = win.clipboard.?,
+        .quit_flag = &win.running,
+    };
+    ph.attach();
+    app.channels.platform = &ph;
 
     eng.sendWindowMetrics(width, height, pixel_ratio);
 

@@ -59,6 +59,7 @@ pub const Engine = struct {
         cfg: manifest.Config,
         renderer: *const c.FlutterRendererConfig,
         user_data: ?*anyopaque,
+        platform_message_callback: c.FlutterPlatformMessageCallback,
     ) !*Engine {
         const self = try allocator.create(Engine);
         errdefer allocator.destroy(self);
@@ -136,6 +137,7 @@ pub const Engine = struct {
         args.aot_data = self.aot_data;
         args.custom_task_runners = &self.custom_task_runners;
         args.shutdown_dart_vm_when_done = true;
+        args.platform_message_callback = platform_message_callback;
 
         if (self.procs.Initialize.?(@intCast(c.FLUTTER_ENGINE_VERSION), renderer, &args, user_data, &self.handle) != 0)
             return error.EngineInitializeFailed;
@@ -193,6 +195,17 @@ pub const Engine = struct {
         if (result != 0) {
             std.debug.print("fembed: SendPlatformMessage failed: {}\n", .{result});
         }
+    }
+
+    /// Respond to a platform message received from the framework. Must be called
+    /// for every message delivered to the platform message callback.
+    pub fn sendPlatformMessageResponse(
+        self: *Engine,
+        handle: ?*const c.FlutterPlatformMessageResponseHandle,
+        message: []const u8,
+    ) void {
+        if (handle == null) return;
+        _ = self.procs.SendPlatformMessageResponse.?(self.handle, handle, message.ptr, message.len);
     }
 
     /// The fd to poll alongside the Wayland display fd in order to be woken up

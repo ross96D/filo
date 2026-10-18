@@ -7,10 +7,12 @@ const xdg = wayland.client.xdg;
 
 const input = @import("input.zig");
 const engine = @import("engine.zig");
+const clipboard = @import("clipboard.zig");
 
 const Globals = struct {
     compositor: ?*wl.Compositor = null,
     wm_base: ?*xdg.WmBase = null,
+    data_device_manager: ?*wl.DataDeviceManager = null,
     seat_name: ?u32 = null,
 };
 
@@ -20,6 +22,7 @@ pub const Window = struct {
     registry: *wl.Registry,
     compositor: *wl.Compositor,
     wm_base: *xdg.WmBase,
+    data_device_manager: *wl.DataDeviceManager,
     seat_name: u32,
     seat: ?*wl.Seat = null,
     surface: *wl.Surface,
@@ -27,6 +30,7 @@ pub const Window = struct {
     toplevel: *xdg.Toplevel,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
+    clipboard: ?*clipboard.Clipboard = null,
     input: ?*input.Input = null,
     running: bool = true,
     configured: bool = false,
@@ -43,6 +47,7 @@ pub const Window = struct {
 
         const compositor = globals.compositor orelse return error.NoCompositor;
         const wm_base = globals.wm_base orelse return error.NoXdgWmBase;
+        const data_device_manager = globals.data_device_manager orelse return error.NoDataDeviceManager;
         const seat_name = globals.seat_name orelse return error.NoSeat;
 
         const surface = try compositor.createSurface();
@@ -60,6 +65,7 @@ pub const Window = struct {
             .registry = registry,
             .compositor = compositor,
             .wm_base = wm_base,
+            .data_device_manager = data_device_manager,
             .seat_name = seat_name,
             .surface = surface,
             .xdg_surface = xdg_surface,
@@ -74,12 +80,20 @@ pub const Window = struct {
         return self;
     }
 
-    /// Attach an input handler and bind pointer/keyboard from the seat.
+    /// Attach an input handler and bind pointer/keyboard (and the clipboard)
+    /// from the seat.
     pub fn setupInput(self: *Window, inp: *input.Input) !void {
         self.input = inp;
         self.seat = try self.registry.bind(self.seat_name, wl.Seat, 8);
         self.seat.?.setListener(*Window, seatListener, self);
         if (self.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+
+        self.clipboard = try clipboard.Clipboard.init(
+            self.allocator,
+            self.display,
+            self.data_device_manager,
+            self.seat.?,
+        );
     }
 
     /// Block until the compositor has sent the initial configure, so that the
@@ -100,6 +114,7 @@ pub const Window = struct {
         var poll_fds = [_]std.posix.pollfd{
             .{ .fd = display_fd, .events = pollin, .revents = 0 },
             .{ .fd = task_fd, .events = pollin, .revents = 0 },
+            .{ .fd = -1, .events = pollin, .revents = 0 },
         };
 
         while (self.running) {
@@ -108,7 +123,17 @@ pub const Window = struct {
             }
             if (self.display.flush() != .SUCCESS) return error.DispatchFailed;
 
-            const n = try std.posix.poll(&poll_fds, -1);
+            // A clipboard paste adds its pipe to the poll set, so it can be
+            // drained (and answered) without ever blocking the loop.
+            var count: usize = 2;
+            if (self.clipboard) |clip| {
+                if (clip.pollFd()) |fd| {
+                    poll_fds[2] = .{ .fd = fd, .events = pollin, .revents = 0 };
+                    count = 3;
+                }
+            }
+
+            const n = try std.posix.poll(poll_fds[0..count], -1);
             if (n > 0) {
                 if (poll_fds[0].revents & pollin != 0) {
                     if (self.display.readEvents() != .SUCCESS) return error.DispatchFailed;
@@ -118,6 +143,12 @@ pub const Window = struct {
                 if (poll_fds[1].revents & pollin != 0) {
                     eng.drainPlatformTasks();
                 }
+                if (count == 3 and poll_fds[2].revents != 0) {
+                    // Any event retires the transfer: readable, end-of-file
+                    // (the source closed without writing, i.e. empty text), or
+                    // an error. `POLLIN` alone would miss the empty case.
+                    if (self.clipboard) |clip| clip.pump();
+                }
             }
 
             if (self.display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
@@ -125,6 +156,7 @@ pub const Window = struct {
     }
 
     pub fn destroy(self: *Window) void {
+        if (self.clipboard) |clip| clip.deinit();
         if (self.keyboard) |k| k.destroy();
         if (self.pointer) |p| p.destroy();
         if (self.seat) |s| s.destroy();
@@ -133,6 +165,9 @@ pub const Window = struct {
         self.surface.destroy();
         self.compositor.destroy();
         self.wm_base.destroy();
+        // `wl_data_device_manager` has no destructor below version 4, which is
+        // all we bind, so drop the proxy directly.
+        @as(*wl.Proxy, @ptrCast(self.data_device_manager)).destroy();
         self.registry.destroy();
         self.display.disconnect();
         self.allocator.destroy(self);
@@ -145,6 +180,8 @@ pub const Window = struct {
                     globals.compositor = registry.bind(global.name, wl.Compositor, 1) catch return;
                 } else if (std.mem.orderZ(u8, global.interface, xdg.WmBase.interface.name) == .eq) {
                     globals.wm_base = registry.bind(global.name, xdg.WmBase, 1) catch return;
+                } else if (std.mem.orderZ(u8, global.interface, wl.DataDeviceManager.interface.name) == .eq) {
+                    globals.data_device_manager = registry.bind(global.name, wl.DataDeviceManager, @min(global.version, 3)) catch return;
                 } else if (std.mem.orderZ(u8, global.interface, wl.Seat.interface.name) == .eq) {
                     globals.seat_name = global.name;
                 }
@@ -175,6 +212,7 @@ pub const Window = struct {
         const inp = self.input orelse return;
         switch (event) {
             .enter => |e| {
+                if (self.clipboard) |clip| clip.updateSerial(e.serial);
                 inp.pointerEnter(e.surface_x.toDouble(), e.surface_y.toDouble());
             },
             .leave => {
@@ -184,6 +222,7 @@ pub const Window = struct {
                 inp.pointerMotion(m.surface_x.toDouble(), m.surface_y.toDouble(), m.time);
             },
             .button => |b| {
+                if (self.clipboard) |clip| clip.updateSerial(b.serial);
                 inp.pointerButton(b.button, b.state == .pressed, b.time);
             },
             .axis => |a| {
@@ -210,7 +249,13 @@ pub const Window = struct {
                 defer posix.munmap(mapped);
                 inp.setKeymapFromBuffer(mapped);
             },
+            .enter => |e| {
+                // `set_selection` is only accepted with a serial from a recent
+                // seat event, and gaining focus is one.
+                if (self.clipboard) |clip| clip.updateSerial(e.serial);
+            },
             .key => |k| {
+                if (self.clipboard) |clip| clip.updateSerial(k.serial);
                 inp.handleKey(k.key + 8, k.state == .pressed, k.time);
             },
             .modifiers => |m| {

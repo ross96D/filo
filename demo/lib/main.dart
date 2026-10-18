@@ -32,6 +32,23 @@ class _DemoAppState extends State<DemoApp> {
     return false;
   }
 
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: _controller.text));
+    print('[demo] clipboard set: "${_controller.text}"');
+  }
+
+  Future<void> _paste() async {
+    final ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+    print('[demo] clipboard get: "${data?.text}"');
+    if (data?.text != null) {
+      _controller.text = data!.text!;
+    }
+  }
+
+  Future<void> _hasStrings() async {
+    print('[demo] clipboard hasStrings: ${await Clipboard.hasStrings()}');
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -86,6 +103,24 @@ class _DemoAppState extends State<DemoApp> {
                     print('[demo] tap $_clicks');
                   },
                   child: const Text('Click me'),
+                ),
+                const SizedBox(height: 24),
+                Wrap(
+                  spacing: 12,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _copy,
+                      child: const Text('Copy'),
+                    ),
+                    ElevatedButton(
+                      onPressed: _paste,
+                      child: const Text('Paste'),
+                    ),
+                    ElevatedButton(
+                      onPressed: _hasStrings,
+                      child: const Text('Has strings'),
+                    ),
+                  ],
                 ),
               ],
             ),

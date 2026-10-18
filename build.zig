@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     scanner.generate("wl_compositor", 5);
     scanner.generate("xdg_wm_base", 6);
     scanner.generate("wl_seat", 8);
+    scanner.generate("wl_data_device_manager", 3);
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
 
@@ -79,4 +80,20 @@ pub fn build(b: *std.Build) void {
     });
     const fmt_step = b.step("fmt", "Format source files");
     fmt_step.dependOn(&fmt.step);
+
+    // `zig build test`: run unit tests.
+    const test_step = b.step("test", "Run unit tests");
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    unit_tests.root_module.addImport("flutter", flutter);
+    unit_tests.root_module.addImport("xkb", xkb);
+    unit_tests.root_module.addImport("wayland", wayland);
+    const run_tests = b.addRunArtifact(unit_tests);
+    test_step.dependOn(&run_tests.step);
 }
