@@ -134,7 +134,7 @@ fn keysymToLogical(keysym: u32) u64 {
         @intCast(xkb.XKB_KEY_Alt_R) => 0x00200000105,
         @intCast(xkb.XKB_KEY_Super_L) => 0x00200000106,
         @intCast(xkb.XKB_KEY_Super_R) => 0x00200000107,
-        @intCast(xkb.XKB_KEY_Caps_Lock) => 0x00200000108,
+        @intCast(xkb.XKB_KEY_Caps_Lock) => 0x00100000104,
         @intCast(xkb.XKB_KEY_F1) => 0x00100000801,
         @intCast(xkb.XKB_KEY_F2) => 0x00100000802,
         @intCast(xkb.XKB_KEY_F3) => 0x00100000803,
@@ -147,7 +147,7 @@ fn keysymToLogical(keysym: u32) u64 {
         @intCast(xkb.XKB_KEY_F10) => 0x0010000080a,
         @intCast(xkb.XKB_KEY_F11) => 0x0010000080b,
         @intCast(xkb.XKB_KEY_F12) => 0x0010000080c,
-        else => 0,
+        else => 0x01500000000 | @as(u64, keysym),
     };
 }
 
@@ -249,7 +249,8 @@ pub const Input = struct {
             .struct_size = @sizeOf(c.FlutterKeyEvent),
             .timestamp = @floatFromInt(@as(u64, time_ms) * 1000),
             .type = if (pressed) @intCast(c.kFlutterKeyEventTypeDown) else @intCast(c.kFlutterKeyEventTypeUp),
-            .physical = evdevToHid(keycode -% 8),
+            // Usage Page (16 bits)  | Usage ID (16 bits) 
+            .physical = 0x07 << 16 | evdevToHid(keycode - 8),
             .logical = 0,
             .character = null,
             .synthesized = false,
