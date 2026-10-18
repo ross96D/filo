@@ -252,6 +252,14 @@ pub const Input = struct {
         _ = xkb.xkb_state_update_mask(state, depressed, latched, locked, 0, 0, group);
     }
 
+    // TODO: this is not spec compliant with the flutter protocol and do not handle repeat events
+    // 
+    //  * Each key press sequence shall consist of one key down event (`kind` being
+    //    `kFlutterKeyEventTypeDown`), zero or more repeat events, and one key up
+    //    event, representing a physical key button being pressed, held, and
+    //    released.
+    //  * All events throughout a key press sequence shall have the same `physical`
+    //    and `logical`. Having different `character`s is allowed.
     pub fn handleKey(self: *Input, keycode: u32, pressed: bool, time_ms: u32) void {
         const state = self.state orelse return;
         const keymap = self.keymap orelse return;
