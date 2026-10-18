@@ -7,6 +7,9 @@
         .wayland = .{
             .path = "vendor/zig-wayland",
         },
+        .vulkan_zig = .{
+            .path = "vendor/vulkan-zig",
+        },
     },
     .paths = .{
         "build.zig",

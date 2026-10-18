@@ -13,8 +13,8 @@ pub fn build(b: *std.Build) void {
     });
     scanner.addCustomProtocol(b.path("vendor/protocols/xdg-shell.xml"));
     scanner.generate("wl_compositor", 5);
-    scanner.generate("wl_shm", 1);
     scanner.generate("xdg_wm_base", 6);
+    scanner.generate("wl_seat", 8);
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
 
@@ -24,6 +24,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const flutter = flutter_c.createModule();
+
+    const vulkan = b.dependency("vulkan_zig", .{
+        .registry = b.path("vendor/protocols/vk.xml"),
+    }).module("vulkan-zig");
+
+    const xkb_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/xkb/xkb.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    xkb_c.addIncludePath(b.path("vendor/xkb"));
+    const xkb = xkb_c.createModule();
 
     const exe = b.addExecutable(.{
         .name = "fembed",
@@ -37,7 +49,10 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addImport("wayland", wayland);
     exe.root_module.addImport("flutter", flutter);
+    exe.root_module.addImport("vulkan", vulkan);
+    exe.root_module.addImport("xkb", xkb);
     exe.root_module.linkSystemLibrary("wayland-client", .{});
+    exe.root_module.linkSystemLibrary("xkbcommon", .{});
 
     b.installArtifact(exe);
 
