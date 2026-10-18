@@ -1,0 +1,18 @@
+const std = @import("std");
+const wayland = @import("wayland");
+const wl = wayland.client.wl;
+
+pub fn main() !void {
+    const display = try wl.Display.connect(null);
+    defer display.disconnect();
+    const registry = try display.getRegistry();
+    defer registry.destroy();
+    var foo: u32 = 42;
+    registry.setListener(*u32, listener, &foo);
+    if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+}
+
+fn listener(_: *wl.Registry, event: wl.Registry.Event, data: *u32) void {
+    std.debug.print("foo is {}\n", .{data.*});
+    std.debug.print("event is {}\n", .{event});
+}
