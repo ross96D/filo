@@ -12,8 +12,21 @@ const device_extensions = [_][*:0]const u8{
 
 const api_version = vk.API_VERSION_1_3;
 
+/// The one layer worth having: it turns the renderer's Vulkan misuse into
+/// output instead of silence.
+const validation_layer: [*:0]const u8 = "VK_LAYER_KHRONOS_validation";
+const validation_layers = [_][*:0]const u8{validation_layer};
+
+pub const Options = struct {
+    /// Enable the validation layer, if it is installed.
+    validation: bool = false,
+    /// Print per-frame synchronization timings every 60 frames.
+    trace: bool = false,
+};
+
 pub const Context = struct {
     allocator: std.mem.Allocator,
+    options: Options,
     lib: std.DynLib,
     vkb: vk.BaseWrapper,
     instance: vk.Instance,
@@ -24,7 +37,7 @@ pub const Context = struct {
     queue: vk.Queue,
     queue_family: u32,
 
-    pub fn init(allocator: std.mem.Allocator) !Context {
+    pub fn init(allocator: std.mem.Allocator, options: Options) !Context {
         var lib = try std.DynLib.open("libvulkan.so.1");
         errdefer lib.close();
 
@@ -33,8 +46,11 @@ pub const Context = struct {
 
         var self: Context = undefined;
         self.allocator = allocator;
+        self.options = options;
         self.lib = lib;
         self.vkb = vk.BaseWrapper.load(get_instance_proc_addr);
+
+        const layers = try self.enabledLayers();
 
         self.instance = try self.vkb.createInstance(&.{
             .p_application_info = &.{
@@ -44,8 +60,8 @@ pub const Context = struct {
                 .engine_version = vk.makeApiVersion(0, 1, 0, 0).toU32(),
                 .api_version = api_version.toU32(),
             },
-            .enabled_layer_count = 0,
-            .pp_enabled_layer_names = null,
+            .enabled_layer_count = @intCast(layers.len),
+            .pp_enabled_layer_names = @ptrCast(layers.ptr),
             .enabled_extension_count = instance_extensions.len,
             .pp_enabled_extension_names = @ptrCast(&instance_extensions),
         }, null);
@@ -67,6 +83,29 @@ pub const Context = struct {
         self.vkd.destroyDevice(self.device, null);
         self.vki.destroyInstance(self.instance, null);
         self.lib.close();
+    }
+
+    /// The layer names to enable. Asking for validation on a machine that does
+    /// not have the layer would otherwise fail the whole instance, so check
+    /// first and carry on without it.
+    fn enabledLayers(self: *Context) ![]const [*:0]const u8 {
+        const no_layers: []const [*:0]const u8 = &.{};
+        if (!self.options.validation) return no_layers;
+        if (!try self.hasLayer(validation_layer)) {
+            std.debug.print("fembed: {s} is not installed, continuing without validation\n", .{validation_layer});
+            return no_layers;
+        }
+        return &validation_layers;
+    }
+
+    fn hasLayer(self: *Context, name: [*:0]const u8) !bool {
+        const props = try self.vkb.enumerateInstanceLayerPropertiesAlloc(self.allocator);
+        defer self.allocator.free(props);
+
+        for (props) |prop| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&prop.layer_name, 0), std.mem.span(name))) return true;
+        }
+        return false;
     }
 
     fn pickPhysicalDevice(self: *Context) !vk.PhysicalDevice {
@@ -122,6 +161,100 @@ pub const Context = struct {
     }
 };
 
+/// Per-frame timings for the render synchronization: how long a frame waits for
+/// an image, how long presenting takes, and how far apart frames are. A
+/// synchronization cost that is not visible anywhere else shows up here.
+///
+/// Reading the clock is not free on every machine (with the HPET clocksource
+/// the kernel has to be called for the time), so this costs a few microseconds
+/// per frame while it is on, and is off unless `FEMBED_TRACE` asks for it.
+const Trace = struct {
+    enabled: bool,
+
+    frames: u32 = 0,
+    wait_ns: u64 = 0,
+    wait_max_ns: u64 = 0,
+    present_ns: u64 = 0,
+    present_max_ns: u64 = 0,
+    interval_ns: u64 = 0,
+    interval_max_ns: u64 = 0,
+    last_frame_ns: u64 = 0,
+
+    /// The window to average over. Printing every frame would cost more than
+    /// what is being measured.
+    const report_every = 60;
+
+    fn init(enabled: bool) Trace {
+        return .{ .enabled = enabled };
+    }
+
+    /// A timestamp for `since`: 0 when tracing is off, which makes the two
+    /// calls around a phase do nothing at all.
+    fn now(self: *Trace) u64 {
+        if (!self.enabled) return 0;
+        return monotonicNs();
+    }
+
+    fn since(self: *Trace, start: u64) u64 {
+        if (!self.enabled) return 0;
+        return monotonicNs() - start;
+    }
+
+    /// Record the wait for one frame and the gap since the previous one, and
+    /// print the window every `report_every` frames.
+    fn record(self: *Trace, wait_ns: u64, frame_start: u64) void {
+        if (!self.enabled) return;
+
+        accumulate(&self.wait_ns, &self.wait_max_ns, wait_ns);
+        if (self.last_frame_ns != 0) {
+            accumulate(&self.interval_ns, &self.interval_max_ns, frame_start - self.last_frame_ns);
+        }
+        self.last_frame_ns = frame_start;
+        self.frames += 1;
+        if (self.frames % report_every != 0) return;
+
+        std.debug.print(
+            "fembed: trace {d} frames: wait avg {}us max {}us, present avg {}us max {}us, interval avg {}us max {}us\n",
+            .{
+                report_every,
+                self.wait_ns / report_every / std.time.ns_per_us,
+                self.wait_max_ns / std.time.ns_per_us,
+                self.present_ns / report_every / std.time.ns_per_us,
+                self.present_max_ns / std.time.ns_per_us,
+                self.interval_ns / (report_every - 1) / std.time.ns_per_us,
+                self.interval_max_ns / std.time.ns_per_us,
+            },
+        );
+
+        self.wait_ns = 0;
+        self.wait_max_ns = 0;
+        self.present_ns = 0;
+        self.present_max_ns = 0;
+        self.interval_ns = 0;
+        self.interval_max_ns = 0;
+    }
+
+    fn recordPresent(self: *Trace, ns: u64) void {
+        if (!self.enabled) return;
+        accumulate(&self.present_ns, &self.present_max_ns, ns);
+    }
+};
+
+fn accumulate(total: *u64, max: *u64, ns: u64) void {
+    total.* += ns;
+    if (ns > max.*) max.* = ns;
+}
+
+/// Nanoseconds on the monotonic clock. Zig 0.17 only offers clock reads through
+/// `std.Io`, which the render callbacks have no handle on, and this one is not
+/// even cheap everywhere: with the HPET clocksource the kernel has to be called
+/// for the time, which is why the trace above is opt-in.
+fn monotonicNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
 /// A swapchain and the images it holds. `Surface` swaps one of these out for
 /// another when the window changes size.
 const Swapchain = struct {
@@ -131,8 +264,13 @@ const Swapchain = struct {
     /// Extent it was created with. The driver may clamp what we ask for, so this
     /// is not necessarily the size the engine draws at.
     extent: vk.Extent2D,
+    /// Armed by every acquire of an image from this swapchain and waited on
+    /// straight after: it signals when the image is free to write to again,
+    /// which is what the presentation engine, rather than the GPU, decides.
+    fence: vk.Fence,
 
     fn destroy(self: Swapchain, ctx: *Context) void {
+        ctx.vkd.destroyFence(ctx.device, self.fence, null);
         ctx.vkd.destroySwapchainKHR(ctx.device, self.handle, null);
         ctx.allocator.free(self.images);
     }
@@ -159,6 +297,8 @@ pub const Surface = struct {
     /// Set when the swapchain no longer matches the surface: a suboptimal
     /// present, or an out-of-date acquire. It is rebuilt on the next frame.
     stale: bool = false,
+    /// Per-frame timing of the synchronization above, off unless asked for.
+    trace: Trace,
 
     pub fn create(ctx: *Context, wl_display: *anyopaque, wl_surface: *anyopaque, width: u32, height: u32) !Surface {
         const surface = try ctx.vki.createWaylandSurfaceKHR(ctx.instance, &.{
@@ -173,6 +313,7 @@ pub const Surface = struct {
             .surface = surface,
             .swapchain = try buildSwapchain(ctx, surface, size),
             .frame_size = size,
+            .trace = Trace.init(ctx.options.trace),
         };
     }
 
@@ -186,12 +327,18 @@ pub const Surface = struct {
         // and not a valid swapchain: leave the current one in place.
         if (size.width == 0 or size.height == 0) return;
 
+        // The old swapchain's images may still be in use: the engine
+        // host-synced its own rendering before handing the last frame back, but
+        // the present of that frame has not necessarily completed. Drain the
+        // queue before tearing it down. This is once per resize rather than once
+        // per frame, and it is the queue, not the whole device.
+        try self.ctx.vkd.queueWaitIdle(self.ctx.queue);
+
         // The old swapchain goes first: a driver rejects a second one for the
         // same surface (`VK_ERROR_NATIVE_WINDOW_IN_USE_KHR`), which is what
         // passing it as `oldSwapchain` avoids, but that way a failed create
         // retires the old swapchain too, so it cannot be kept as a fallback
-        // either. Nothing is in flight here, `acquire` has waited for the device
-        // to go idle.
+        // either.
         if (self.swapchain) |swapchain| swapchain.destroy(self.ctx);
         self.swapchain = null;
 
@@ -251,10 +398,24 @@ pub const Surface = struct {
         errdefer ctx.allocator.free(images);
         _ = try ctx.vkd.getSwapchainImagesKHR(ctx.device, swapchain, &n, images.ptr);
 
-        return .{ .handle = swapchain, .format = format, .images = images, .extent = extent };
+        // Created unsignaled: it is armed by each acquire and reset after the
+        // wait that follows it.
+        const fence = try ctx.vkd.createFence(ctx.device, &.{}, null);
+        errdefer ctx.vkd.destroyFence(ctx.device, fence, null);
+
+        return .{
+            .handle = swapchain,
+            .format = format,
+            .images = images,
+            .extent = extent,
+            .fence = fence,
+        };
     }
 
     pub fn destroy(self: *Surface) void {
+        // The one place a device-wide wait is the right tool: once, at teardown,
+        // with the engine already shut down.
+        self.ctx.vkd.deviceWaitIdle(self.ctx.device) catch {};
         if (self.swapchain) |swapchain| swapchain.destroy(self.ctx);
         self.ctx.vki.destroySurfaceKHR(self.ctx.instance, self.surface, null);
     }
@@ -268,19 +429,24 @@ pub const Surface = struct {
     /// the loop only sends window metrics, it never touches the swapchain.
     pub fn acquire(self: *Surface, width: u32, height: u32) !Frame {
         const size = vk.Extent2D{ .width = width, .height = height };
+        const frame_start = self.trace.now();
 
         var retried = false;
         while (true) {
             try self.resize(size);
             const swapchain = self.swapchain orelse return error.NoSwapchain;
 
-            try self.ctx.vkd.deviceWaitIdle(self.ctx.device);
+            // Wait for this one image to be free to write to, rather than for
+            // the whole device: the engine host-synced its own rendering before
+            // handing the last frame back, so the presentation engine releasing
+            // the image is the only thing left to synchronize on.
+            const wait_start = self.trace.now();
             const acquired = self.ctx.vkd.acquireNextImageKHR(
                 self.ctx.device,
                 swapchain.handle,
                 std.math.maxInt(u64),
                 .null,
-                .null,
+                swapchain.fence,
             ) catch |err| switch (err) {
                 // The surface moved on without a configure telling us to (an
                 // output scale change, for instance): rebuild for the same size
@@ -293,9 +459,15 @@ pub const Surface = struct {
                 },
                 else => return err,
             };
+            // A fence left signaled cannot be passed to the next acquire, so
+            // giving up past this point means giving up the swapchain with it.
+            errdefer self.stale = true;
+            _ = try self.ctx.vkd.waitForFences(self.ctx.device, &.{swapchain.fence}, .true, std.math.maxInt(u64));
+            try self.ctx.vkd.resetFences(self.ctx.device, &.{swapchain.fence});
 
             // Usable for this frame, but not for the next one.
             if (acquired.result == .suboptimal_khr) self.stale = true;
+            self.trace.record(self.trace.since(wait_start), frame_start);
             return .{ .image = swapchain.images[acquired.image_index], .format = swapchain.format };
         }
     }
@@ -311,6 +483,7 @@ pub const Surface = struct {
             .p_swapchains = @ptrCast(&swapchain.handle),
             .p_image_indices = @ptrCast(&index),
         };
+        const present_start = self.trace.now();
         const presented = self.ctx.vkd.queuePresentKHR(self.ctx.queue, &present_info) catch |err| switch (err) {
             // The frame was not shown. The image belongs to a swapchain that is
             // about to be rebuilt, so there is nothing left to present.
@@ -320,6 +493,7 @@ pub const Surface = struct {
             },
             else => return err,
         };
+        self.trace.recordPresent(self.trace.since(present_start));
 
         if (presented == .suboptimal_khr) self.stale = true;
     }

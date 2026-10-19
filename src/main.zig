@@ -114,7 +114,10 @@ pub fn main(init: std.process.Init) !void {
     defer win.destroy();
     try win.waitConfigured();
 
-    var ctx = try vulkan.Context.init(allocator);
+    var ctx = try vulkan.Context.init(allocator, .{
+        .validation = init.environ_map.get("FEMBED_VULKAN_VALIDATION") != null,
+        .trace = init.environ_map.get("FEMBED_TRACE") != null,
+    });
     defer ctx.deinit();
 
     var app = App{
