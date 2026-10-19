@@ -14,6 +14,11 @@ const Globals = struct {
     wm_base: ?*xdg.WmBase = null,
     data_device_manager: ?*wl.DataDeviceManager = null,
     seat_name: ?u32 = null,
+    /// The first output, by registry name and version. Bound after the window
+    /// exists, so that the events a bind sends are not dispatched before there
+    /// is anything to listen for them.
+    output_name: ?u32 = null,
+    output_version: u32 = 0,
 };
 
 /// What a configure of 0×0 means: the compositor is leaving the size to us.
@@ -38,10 +43,13 @@ pub const Window = struct {
     surface: *wl.Surface,
     xdg_surface: *xdg.Surface,
     toplevel: *xdg.Toplevel,
+    output: ?*wl.Output = null,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
     clipboard: ?*clipboard.Clipboard = null,
     input: ?*input.Input = null,
+    /// The engine, once the event loop runs: the vsync handler answers it.
+    eng: ?*engine.Engine = null,
     running: bool = true,
     configured: bool = false,
     /// Size the compositor last asked for, in surface (logical) pixels. Starts
@@ -52,6 +60,21 @@ pub const Window = struct {
     /// Set by a configure that changed the size, drained by `run`, which
     /// forwards it to the engine.
     resized: bool = false,
+    /// The output's current mode, for `FlutterEngineNotifyDisplayUpdate`.
+    display_width: u32 = 0,
+    display_height: u32 = 0,
+    refresh_mhz: u32 = 0,
+    /// How far apart the display's refreshes are, for the vsync timestamps.
+    frame_period_ns: u64 = engine.default_frame_period_ns,
+    /// The frame callback we are waiting on, or null when none is armed.
+    frame_callback: ?*wl.Callback = null,
+    /// When the callback above was armed, to notice a repaint that never comes.
+    armed_at_ns: u64 = 0,
+    /// A compositor tick that arrived with no frame waiting for it.
+    tick: ?VsyncTimes = null,
+    /// Whether the first tick has been answered from our own clock, which is all
+    /// it takes to get the first frame on screen.
+    bootstrapped: bool = false,
 
     pub fn create(allocator: std.mem.Allocator) !*Window {
         const display = try wl.Display.connect(null);
@@ -93,6 +116,12 @@ pub const Window = struct {
         xdg_surface.setListener(*Window, xdgSurfaceListener, self);
         toplevel.setListener(*Window, toplevelListener, self);
 
+        if (globals.output_name) |name| {
+            const version = @min(globals.output_version, wl.Output.generated_version);
+            self.output = registry.bind(name, wl.Output, version) catch null;
+            if (self.output) |output| output.setListener(*Window, outputListener, self);
+        }
+
         surface.commit();
 
         return self;
@@ -120,6 +149,12 @@ pub const Window = struct {
         while (!self.configured) {
             if (self.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
         }
+        // The output's mode arrives in response to the bind, which happened
+        // before this; one more roundtrip makes sure it has been dispatched
+        // before the display is reported to the engine.
+        if (self.refresh_mhz == 0) {
+            if (self.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
+        }
         // The caller creates the swapchain and sends the initial window metrics
         // from `width`/`height` right after this, so a configure that arrived
         // while we waited is already accounted for.
@@ -130,6 +165,7 @@ pub const Window = struct {
     /// engine's platform task runner via an eventfd so that framework-to-host
     /// platform messages (e.g. keyboard state sync) get a timely response.
     pub fn run(self: *Window, eng: *engine.Engine) !void {
+        self.eng = eng;
         const display_fd = self.display.getFd();
         const task_fd = eng.getPlatformEventFd();
         const pollin: i16 = std.posix.POLL.IN;
@@ -155,13 +191,21 @@ pub const Window = struct {
                 }
             }
 
-            const n = try std.posix.poll(poll_fds[0..count], -1);
+            // While the engine is waiting for a tick, wake up often enough to
+            // notice a repaint that is not coming; otherwise wait for events.
+            const timeout_ms: i32 = if (eng.hasVsyncRequests())
+                @intCast(2 * self.frame_period_ns / std.time.ns_per_ms)
+            else
+                -1;
+            const n = try std.posix.poll(poll_fds[0..count], timeout_ms);
+            // A prepared read has to be either read or cancelled, and a timeout
+            // (or an error on the display fd) means there is nothing to read.
+            if (n > 0 and poll_fds[0].revents & pollin != 0) {
+                if (self.display.readEvents() != .SUCCESS) return error.DispatchFailed;
+            } else {
+                self.display.cancelRead();
+            }
             if (n > 0) {
-                if (poll_fds[0].revents & pollin != 0) {
-                    if (self.display.readEvents() != .SUCCESS) return error.DispatchFailed;
-                } else {
-                    self.display.cancelRead();
-                }
                 if (poll_fds[1].revents & pollin != 0) {
                     eng.drainPlatformTasks();
                 }
@@ -176,7 +220,73 @@ pub const Window = struct {
             if (self.display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
 
             self.applyResize(eng);
+            self.serviceVsync(eng);
         }
+    }
+
+    /// Answer the engine when it is waiting for the display's next refresh. The
+    /// compositor's frame callback is that refresh: one is always armed, before
+    /// the frame that will be presented, so it is answered by the repaint that
+    /// shows that frame.
+    fn serviceVsync(self: *Window, eng: *engine.Engine) void {
+        if (!eng.hasVsyncRequests()) return;
+
+        // A tick the compositor has already given us is the display's own frame
+        // clock, and the best answer there is.
+        if (self.tick) |tick| {
+            self.tick = null;
+            eng.fireVsync(tick.start_ns, tick.target_ns);
+            return;
+        }
+
+        if (self.frame_callback == null and !self.armFrameCallback(eng)) {
+            // No frame clock at all: keep the engine going at the nominal rate
+            // rather than stalling it every frame.
+            const now = eng.currentTime();
+            eng.fireVsync(now, now + self.frame_period_ns);
+            return;
+        }
+
+        // The first frame has not been presented yet, so the compositor has
+        // nothing to time and need not answer a frame request at all (niri does
+        // not). Answer once from our own clock so the engine draws that first
+        // frame; every tick after it comes from the compositor.
+        if (!self.bootstrapped) {
+            self.bootstrapped = true;
+            const now = eng.currentTime();
+            eng.fireVsync(now, now + self.frame_period_ns);
+            return;
+        }
+
+        // A compositor is only obliged to answer a frame request when it paints
+        // the surface, and niri does not paint for the request alone: if the
+        // repaint that would have answered this one has already been and gone,
+        // no tick is coming. Keep the request armed for the next repaint, but
+        // hand the engine a tick from our own clock rather than stalling it.
+        if (eng.currentTime() - self.armed_at_ns > 2 * self.frame_period_ns) {
+            const now = eng.currentTime();
+            eng.fireVsync(now, now + self.frame_period_ns);
+        }
+    }
+
+    /// Ask the compositor for the next repaint of the surface. One is kept
+    /// armed whenever the engine might draw again, so that the request is always
+    /// on the wire before the frame it should report. False means the request
+    /// could not be made, and there is no frame clock to wait on.
+    fn armFrameCallback(self: *Window, eng: *engine.Engine) bool {
+        if (self.frame_callback != null) return true;
+
+        const callback = self.surface.frame() catch |err| {
+            std.debug.print("fembed: wl_surface.frame failed: {}\n", .{err});
+            return false;
+        };
+        callback.setListener(*Window, frameListener, self);
+        self.frame_callback = callback;
+        self.armed_at_ns = eng.currentTime();
+        // The request has to be on the wire before the frame the engine is about
+        // to draw is committed.
+        _ = self.display.flush();
+        return true;
     }
 
     /// Forward a size the compositor asked for to the engine. The swapchain
@@ -195,10 +305,58 @@ pub const Window = struct {
         eng.scheduleFrame();
     }
 
+    /// The output's current mode is what the display actually refreshes at, and
+    /// what the engine wants to know about.
+    fn outputListener(_: *wl.Output, event: wl.Output.Event, self: *Window) void {
+        switch (event) {
+            .mode => |mode| {
+                // Modes that are not current are what the output *could* do.
+                if (!mode.flags.current) return;
+                if (mode.width <= 0 or mode.height <= 0) return;
+                self.display_width = @intCast(mode.width);
+                self.display_height = @intCast(mode.height);
+                // Zero means the compositor does not know the refresh rate.
+                if (mode.refresh <= 0) return;
+                self.refresh_mhz = @intCast(mode.refresh);
+                self.frame_period_ns = framePeriodNs(self.refresh_mhz);
+                if (self.eng) |eng| eng.frame_period_ns = self.frame_period_ns;
+            },
+            else => {},
+        }
+    }
+
+    /// The compositor saying the surface has been repainted: the display's frame
+    /// clock tick.
+    fn frameListener(callback: *wl.Callback, event: wl.Callback.Event, self: *Window) void {
+        switch (event) {
+            .done => |done| {
+                // The compositor destroys the object after firing it; the proxy
+                // on this side is ours to free, and has no destructor request.
+                callback.destroy();
+                self.frame_callback = null;
+
+                const eng = self.eng orelse return;
+                const times = vsyncTimes(eng.currentTime(), done.callback_data, self.frame_period_ns);
+                if (eng.hasVsyncRequests()) {
+                    eng.fireVsync(times.start_ns, times.target_ns);
+                } else {
+                    // Nothing is waiting for it, but the next request should not
+                    // have to wait for another repaint.
+                    self.tick = times;
+                }
+                _ = self.armFrameCallback(eng);
+            },
+        }
+    }
+
     pub fn destroy(self: *Window) void {
         if (self.clipboard) |clip| clip.deinit();
         if (self.keyboard) |k| k.destroy();
         if (self.pointer) |p| p.destroy();
+        if (self.output) |o| {
+            // `release` needs version 3; below that the proxy is all there is.
+            if (o.getVersion() >= 3) o.release() else @as(*wl.Proxy, @ptrCast(o)).destroy();
+        }
         if (self.seat) |s| s.destroy();
         self.toplevel.destroy();
         self.xdg_surface.destroy();
@@ -224,6 +382,14 @@ pub const Window = struct {
                     globals.data_device_manager = registry.bind(global.name, wl.DataDeviceManager, @min(global.version, 3)) catch return;
                 } else if (std.mem.orderZ(u8, global.interface, wl.Seat.interface.name) == .eq) {
                     globals.seat_name = global.name;
+                } else if (std.mem.orderZ(u8, global.interface, wl.Output.interface.name) == .eq) {
+                    // Bound once the window exists: the events a bind sends are
+                    // dispatched on the roundtrips after it, and there has to be
+                    // a listener by then.
+                    if (globals.output_name == null) {
+                        globals.output_name = global.name;
+                        globals.output_version = global.version;
+                    }
                 }
             },
             .global_remove => {},
@@ -341,6 +507,55 @@ pub const Window = struct {
         return .{ @intCast(width), @intCast(height) };
     }
 };
+
+/// How long one refresh lasts, from a `wl_output` mode's refresh rate in mHz.
+fn framePeriodNs(refresh_mhz: u32) u64 {
+    return std.time.ns_per_s * @as(u64, std.time.ms_per_s) / refresh_mhz;
+}
+
+const VsyncTimes = struct { start_ns: u64, target_ns: u64 };
+
+/// The frame timestamps to hand back to the engine. `callback_ms` is the frame
+/// callback's time, which the protocol leaves with a base the spec does not
+/// define (in practice the monotonic clock on wlroots-like compositors) and
+/// truncates to milliseconds, so it is only usable when it lines up with the
+/// engine's own clock. A start time the engine believes is in the future would
+/// park the frame until then, and a wrapped one is just as wrong, so anything
+/// that does not line up becomes "now".
+fn vsyncTimes(now_ns: u64, callback_ms: u32, period_ns: u64) VsyncTimes {
+    const callback_ns = @as(u64, callback_ms) * std.time.ns_per_ms;
+    // A millisecond of truncation plus scheduling jitter; a different timebase
+    // is off by far more than this.
+    const tolerance_ns = 50 * std.time.ns_per_ms;
+    const start_ns = if (callback_ns <= now_ns and now_ns - callback_ns <= tolerance_ns)
+        callback_ns
+    else
+        now_ns;
+    return .{ .start_ns = start_ns, .target_ns = start_ns +| period_ns };
+}
+
+test "the vsync timestamps follow the compositor's frame time when it is usable" {
+    const testing = std.testing;
+
+    // 165 Hz: 6.06 ms per refresh, and the callback time is the frame that just
+    // happened, a millisecond or so in the past.
+    const period = framePeriodNs(165_010);
+    try testing.expectEqual(@as(u64, 6_060_238), period);
+
+    const now: u64 = 10 * std.time.ns_per_ms;
+    const times = vsyncTimes(now, 9, period);
+    try testing.expectEqual(@as(u64, 9 * std.time.ns_per_ms), times.start_ns);
+    try testing.expectEqual(times.start_ns + period, times.target_ns);
+
+    // A callback time in the future is a different clock (or a wrap): the engine
+    // must not be told to wait for it.
+    try testing.expectEqual(now, vsyncTimes(now, 11, period).start_ns);
+    // So is one from long ago: further back than the tolerance, e.g. an epoch
+    // that is not the monotonic clock at all.
+    try testing.expectEqual(60 * std.time.ns_per_ms, vsyncTimes(60 * std.time.ns_per_ms, 0, period).start_ns);
+    // And a 32-bit millisecond wrap lands in the future, not in the past.
+    try testing.expectEqual(now, vsyncTimes(now, std.math.maxInt(u32), period).start_ns);
+}
 
 test "a configure that leaves the size to us is not a resize" {
     const testing = std.testing;

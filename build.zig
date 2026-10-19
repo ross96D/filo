@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     scanner.generate("xdg_wm_base", 6);
     scanner.generate("wl_seat", 8);
     scanner.generate("wl_data_device_manager", 3);
+    scanner.generate("wl_output", 4);
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
 

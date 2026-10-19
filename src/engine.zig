@@ -44,6 +44,11 @@ fn taskRunnerPostTask(task: c.FlutterTask, target_time_ns: u64, user_data: ?*any
     runner.post(task);
 }
 
+/// The refresh period to assume before the window has told us what the display
+/// actually runs at. 60 Hz is the engine's own fallback, so this only makes the
+/// startup timestamps no worse than not having a vsync source at all.
+pub const default_frame_period_ns = 16_666_666;
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     lib: std.DynLib,
@@ -53,13 +58,31 @@ pub const Engine = struct {
     task_runner: TaskRunner,
     task_runner_description: c.FlutterTaskRunnerDescription,
     custom_task_runners: c.FlutterCustomTaskRunners,
+    /// Batons handed to us by the engine's `vsync_callback`, waiting for the
+    /// display's next frame. The engine calls the callback on its raster thread,
+    /// while `FlutterEngineOnVsync` may only be called on the thread that
+    /// started the engine, so they queue here until the event loop answers them.
+    vsync_mutex: std.atomic.Mutex = .unlocked,
+    vsync_batons: std.ArrayListUnmanaged(isize) = .empty,
+    /// How far apart display refreshes are. Set by the window once it knows,
+    /// which is also what the timestamps handed back use.
+    frame_period_ns: u64 = default_frame_period_ns,
+    /// Where `main` keeps the engine pointer the vsync callback reaches it by.
+    /// Cleared at teardown so a late callback cannot touch freed memory; the
+    /// callback reads it from another thread, hence the atomic.
+    self_slot: *std.atomic.Value(?*Engine),
 
     pub fn init(
         allocator: std.mem.Allocator,
         cfg: manifest.Config,
         renderer: *const c.FlutterRendererConfig,
         user_data: ?*anyopaque,
+        /// Filled in before the engine is initialized: the vsync callback runs on
+        /// the raster thread and reaches the engine through this slot, and the
+        /// engine can ask for a frame before `init` has returned.
+        self_slot: *std.atomic.Value(?*Engine),
         platform_message_callback: c.FlutterPlatformMessageCallback,
+        vsync_callback: c.VsyncCallback,
     ) !*Engine {
         const self = try allocator.create(Engine);
         errdefer allocator.destroy(self);
@@ -73,7 +96,10 @@ pub const Engine = struct {
             .task_runner = undefined,
             .task_runner_description = undefined,
             .custom_task_runners = undefined,
+            .self_slot = self_slot,
         };
+        self_slot.*.store(self, .release);
+        errdefer self_slot.*.store(null, .release);
 
         self.lib = try std.DynLib.open(cfg.engine_lib);
         errdefer self.lib.close();
@@ -138,6 +164,9 @@ pub const Engine = struct {
         args.custom_task_runners = &self.custom_task_runners;
         args.shutdown_dart_vm_when_done = true;
         args.platform_message_callback = platform_message_callback;
+        // Without this the engine paces itself with a hardcoded 60 Hz fallback,
+        // no matter what the display can do.
+        args.vsync_callback = vsync_callback;
 
         if (self.procs.Initialize.?(@intCast(c.FLUTTER_ENGINE_VERSION), renderer, &args, user_data, &self.handle) != 0)
             return error.EngineInitializeFailed;
@@ -181,6 +210,79 @@ pub const Engine = struct {
     /// happens to ask for a frame.
     pub fn scheduleFrame(self: *Engine) void {
         _ = self.procs.ScheduleFrame.?(self.handle);
+    }
+
+    /// The engine's own monotonic clock, in nanoseconds: the timebase the vsync
+    /// timestamps we hand back have to be in.
+    pub fn currentTime(self: *Engine) u64 {
+        return self.procs.GetCurrentTime.?();
+    }
+
+    /// Queue a baton the engine is waiting on. Called from the engine's raster
+    /// thread by `vsync_callback`; `fireVsync` answers it from the main thread.
+    pub fn requestVsync(self: *Engine, baton: isize) void {
+        while (!self.vsync_mutex.tryLock()) std.atomic.spinLoopHint();
+        self.vsync_batons.append(std.heap.c_allocator, baton) catch {
+            self.vsync_mutex.unlock();
+            return;
+        };
+        self.vsync_mutex.unlock();
+
+        // Wake the event loop, which is also what makes it service the request.
+        var one: u64 = 1;
+        _ = std.os.linux.write(self.task_runner.eventfd, std.mem.asBytes(&one).ptr, @sizeOf(u64));
+    }
+
+    pub fn hasVsyncRequests(self: *Engine) bool {
+        while (!self.vsync_mutex.tryLock()) std.atomic.spinLoopHint();
+        const pending = self.vsync_batons.items.len != 0;
+        self.vsync_mutex.unlock();
+        return pending;
+    }
+
+    /// Answer every waiting vsync request. `frame_start_ns` is when the display
+    /// refreshes (a time that has just passed means "start now"), and
+    /// `frame_target_ns` when the next refresh is expected.
+    pub fn fireVsync(self: *Engine, frame_start_ns: u64, frame_target_ns: u64) void {
+        while (!self.vsync_mutex.tryLock()) std.atomic.spinLoopHint();
+        var batons = self.vsync_batons;
+        self.vsync_batons = .empty;
+        self.vsync_mutex.unlock();
+        defer batons.deinit(std.heap.c_allocator);
+
+        for (batons.items) |baton| {
+            _ = self.procs.OnVsync.?(self.handle, baton, frame_start_ns, frame_target_ns);
+        }
+    }
+
+    /// What the engine is drawing on. Without this it has no display at all, and
+    /// the framework falls back for `Display.refreshRate` and the frame budget
+    /// derived from it.
+    pub const Display = struct {
+        refresh_rate: f64,
+        width: u32,
+        height: u32,
+        pixel_ratio: f64,
+    };
+
+    pub fn notifyDisplayStartup(self: *Engine, display: Display) void {
+        const displays = [_]c.FlutterEngineDisplay{.{
+            .struct_size = @sizeOf(c.FlutterEngineDisplay),
+            // We only ever have the one output, so it does not need an id.
+            .display_id = 0,
+            .single_display = true,
+            .refresh_rate = display.refresh_rate,
+            .width = display.width,
+            .height = display.height,
+            .device_pixel_ratio = display.pixel_ratio,
+        }};
+        const result = self.procs.NotifyDisplayUpdate.?(
+            self.handle,
+            @intCast(c.kFlutterEngineDisplaysUpdateTypeStartup),
+            displays[0..].ptr,
+            displays.len,
+        );
+        if (result != 0) std.debug.print("fembed: NotifyDisplayUpdate failed: {}\n", .{result});
     }
 
     pub fn sendPointerEvent(self: *Engine, event: *const c.FlutterPointerEvent) void {
@@ -239,6 +341,15 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine) void {
+        // Every baton has to be returned before the engine shuts down, or it
+        // leaks the wait for it. Nothing answers them any more by this point, so
+        // treat the last one as a tick that has already happened.
+        const now = self.currentTime();
+        self.fireVsync(now, now + self.frame_period_ns);
+        // Anything the engine asks for from here on cannot be answered; it must
+        // not reach a freed engine either.
+        self.self_slot.*.store(null, .release);
+
         _ = self.procs.Shutdown.?(self.handle);
         if (self.aot_data != null) {
             _ = self.procs.CollectAOTData.?(self.aot_data);
@@ -246,6 +357,7 @@ pub const Engine = struct {
         self.lib.close();
         _ = std.os.linux.close(self.task_runner.eventfd);
         self.task_runner.list.deinit(std.heap.c_allocator);
+        self.vsync_batons.deinit(std.heap.c_allocator);
         self.allocator.destroy(self);
     }
 };

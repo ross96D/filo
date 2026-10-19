@@ -161,17 +161,23 @@ pub const Context = struct {
     }
 };
 
-/// Per-frame timings for the render synchronization: how long a frame waits for
-/// an image, how long presenting takes, and how far apart frames are. A
-/// synchronization cost that is not visible anywhere else shows up here.
+/// Per-frame timings for the render synchronization: how long the presentation
+/// engine makes us wait for an image, how long the fence for it takes, how long
+/// presenting takes, and how far apart frames are. A synchronization cost that
+/// is not visible anywhere else shows up here.
 ///
-/// Reading the clock is not free on every machine (with the HPET clocksource
-/// the kernel has to be called for the time), so this costs a few microseconds
-/// per frame while it is on, and is off unless `FEMBED_TRACE` asks for it.
+/// The acquire is the number to watch once the engine is paced by the display:
+/// the wait for an image is where a frame that arrives too early spends its
+/// time. Reading the clock is not free on every machine (with the HPET
+/// clocksource the kernel has to be called for the time), so this costs a few
+/// microseconds per frame while it is on, and is off unless `FEMBED_TRACE` asks
+/// for it.
 const Trace = struct {
     enabled: bool,
 
     frames: u32 = 0,
+    acquire_ns: u64 = 0,
+    acquire_max_ns: u64 = 0,
     wait_ns: u64 = 0,
     wait_max_ns: u64 = 0,
     present_ns: u64 = 0,
@@ -200,11 +206,12 @@ const Trace = struct {
         return monotonicNs() - start;
     }
 
-    /// Record the wait for one frame and the gap since the previous one, and
-    /// print the window every `report_every` frames.
-    fn record(self: *Trace, wait_ns: u64, frame_start: u64) void {
+    /// Record the acquire, the fence wait and the gap since the previous frame,
+    /// and print the window every `report_every` frames.
+    fn record(self: *Trace, acquire_ns: u64, wait_ns: u64, frame_start: u64) void {
         if (!self.enabled) return;
 
+        accumulate(&self.acquire_ns, &self.acquire_max_ns, acquire_ns);
         accumulate(&self.wait_ns, &self.wait_max_ns, wait_ns);
         if (self.last_frame_ns != 0) {
             accumulate(&self.interval_ns, &self.interval_max_ns, frame_start - self.last_frame_ns);
@@ -214,9 +221,11 @@ const Trace = struct {
         if (self.frames % report_every != 0) return;
 
         std.debug.print(
-            "fembed: trace {d} frames: wait avg {}us max {}us, present avg {}us max {}us, interval avg {}us max {}us\n",
+            "fembed: trace {d} frames: acquire avg {}us max {}us, wait avg {}us max {}us, present avg {}us max {}us, interval avg {}us max {}us\n",
             .{
                 report_every,
+                self.acquire_ns / report_every / std.time.ns_per_us,
+                self.acquire_max_ns / std.time.ns_per_us,
                 self.wait_ns / report_every / std.time.ns_per_us,
                 self.wait_max_ns / std.time.ns_per_us,
                 self.present_ns / report_every / std.time.ns_per_us,
@@ -226,6 +235,8 @@ const Trace = struct {
             },
         );
 
+        self.acquire_ns = 0;
+        self.acquire_max_ns = 0;
         self.wait_ns = 0;
         self.wait_max_ns = 0;
         self.present_ns = 0;
@@ -440,7 +451,7 @@ pub const Surface = struct {
             // the whole device: the engine host-synced its own rendering before
             // handing the last frame back, so the presentation engine releasing
             // the image is the only thing left to synchronize on.
-            const wait_start = self.trace.now();
+            const acquire_start = self.trace.now();
             const acquired = self.ctx.vkd.acquireNextImageKHR(
                 self.ctx.device,
                 swapchain.handle,
@@ -459,15 +470,18 @@ pub const Surface = struct {
                 },
                 else => return err,
             };
+            const acquire_ns = self.trace.since(acquire_start);
             // A fence left signaled cannot be passed to the next acquire, so
             // giving up past this point means giving up the swapchain with it.
             errdefer self.stale = true;
+            const wait_start = self.trace.now();
             _ = try self.ctx.vkd.waitForFences(self.ctx.device, &.{swapchain.fence}, .true, std.math.maxInt(u64));
             try self.ctx.vkd.resetFences(self.ctx.device, &.{swapchain.fence});
+            const wait_ns = self.trace.since(wait_start);
 
             // Usable for this frame, but not for the next one.
             if (acquired.result == .suboptimal_khr) self.stale = true;
-            self.trace.record(self.trace.since(wait_start), frame_start);
+            self.trace.record(acquire_ns, wait_ns, frame_start);
             return .{ .image = swapchain.images[acquired.image_index], .format = swapchain.format };
         }
     }
