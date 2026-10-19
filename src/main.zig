@@ -12,10 +12,6 @@ const text_input = @import("flutter/text_input.zig");
 const platform_handler = @import("flutter/platform_handler.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 
-const width = 800;
-const height = 600;
-const pixel_ratio = 1.0;
-
 /// Shared `user_data` for the engine: the Vulkan renderer callbacks need the
 /// view, while the platform message callback needs the channel registry. Both
 /// are reached from this one pointer, because the engine only takes a single
@@ -47,14 +43,18 @@ const VulkanView = struct {
         user_data: ?*anyopaque,
         frame_info: [*c]const c.FlutterFrameInfo,
     ) callconv(.c) c.FlutterVulkanImage {
-        _ = frame_info;
         const self = &(@as(*App, @ptrCast(@alignCast(user_data))).view);
-        const index = self.surface.acquire() catch return std.mem.zeroes(c.FlutterVulkanImage);
-        const image = self.surface.images[index];
+        // The engine tells us the size it drew at, which is the size the
+        // swapchain has to be. A zero image tells the engine the frame was lost.
+        const size = frame_info.*.size;
+        const frame = self.surface.acquire(size.width, size.height) catch |e| {
+            std.debug.print("fembed: vulkan frame unavailable: {}\n", .{e});
+            return std.mem.zeroes(c.FlutterVulkanImage);
+        };
         return .{
             .struct_size = @sizeOf(c.FlutterVulkanImage),
-            .image = @backingInt(image),
-            .format = @intCast(@backingInt(self.surface.format)),
+            .image = @backingInt(frame.image),
+            .format = @intCast(@backingInt(frame.format)),
         };
     }
 
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     var app = App{
         .view = .{
             .ctx = ctx,
-            .surface = try vulkan.Surface.create(&ctx, @ptrCast(win.display), @ptrCast(win.surface), width, height),
+            .surface = try vulkan.Surface.create(&ctx, @ptrCast(win.display), @ptrCast(win.surface), win.width, win.height),
         },
         .channels = platform_channel.Registry.init(allocator),
     };
@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     ph.attach();
     app.channels.platform = &ph;
 
-    eng.sendWindowMetrics(width, height, pixel_ratio);
+    eng.sendWindowMetrics(win.width, win.height, win.pixel_ratio);
 
     std.debug.print("fembed: window created, entering event loop\n", .{});
     try win.run(eng);

@@ -175,6 +175,14 @@ pub const Engine = struct {
         _ = self.procs.SendWindowMetricsEvent.?(self.handle, &metrics);
     }
 
+    /// Ask the engine to draw a frame. A window metrics event already makes the
+    /// framework relayout and schedule one, so this is a guarantee rather than a
+    /// requirement: it keeps a resize from being left unpainted if nothing else
+    /// happens to ask for a frame.
+    pub fn scheduleFrame(self: *Engine) void {
+        _ = self.procs.ScheduleFrame.?(self.handle);
+    }
+
     pub fn sendPointerEvent(self: *Engine, event: *const c.FlutterPointerEvent) void {
         _ = self.procs.SendPointerEvent.?(self.handle, event, 1);
     }

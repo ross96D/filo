@@ -13,4 +13,6 @@ test {
     _ = @import("flutter/table.zig");
     _ = @import("flutter/text_input.zig");
     _ = @import("flutter/types/text_input.zig");
+    _ = @import("vulkan.zig");
+    _ = @import("window.zig");
 }

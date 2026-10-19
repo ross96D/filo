@@ -16,6 +16,16 @@ const Globals = struct {
     seat_name: ?u32 = null,
 };
 
+/// What a configure of 0×0 means: the compositor is leaving the size to us.
+const default_width = 800;
+const default_height = 600;
+
+/// The scale factor reported to the engine. Wayland lets the compositor scale
+/// the buffer we attach instead, which is what we rely on: the swapchain is
+/// always as big as the engine drew. Fractional and integer buffer scale would
+/// both mean drawing at a different size than we tell the engine.
+const default_pixel_ratio = 1;
+
 pub const Window = struct {
     allocator: std.mem.Allocator,
     display: *wl.Display,
@@ -34,6 +44,14 @@ pub const Window = struct {
     input: ?*input.Input = null,
     running: bool = true,
     configured: bool = false,
+    /// Size the compositor last asked for, in surface (logical) pixels. Starts
+    /// at the default because the initial configure may leave the size to us.
+    width: u32 = default_width,
+    height: u32 = default_height,
+    pixel_ratio: f64 = default_pixel_ratio,
+    /// Set by a configure that changed the size, drained by `run`, which
+    /// forwards it to the engine.
+    resized: bool = false,
 
     pub fn create(allocator: std.mem.Allocator) !*Window {
         const display = try wl.Display.connect(null);
@@ -102,6 +120,10 @@ pub const Window = struct {
         while (!self.configured) {
             if (self.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
         }
+        // The caller creates the swapchain and sends the initial window metrics
+        // from `width`/`height` right after this, so a configure that arrived
+        // while we waited is already accounted for.
+        self.resized = false;
     }
 
     /// Blocking dispatch loop until the window is closed. Also pumps the
@@ -152,7 +174,25 @@ pub const Window = struct {
             }
 
             if (self.display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
+
+            self.applyResize(eng);
         }
+    }
+
+    /// Forward a size the compositor asked for to the engine. The swapchain
+    /// itself is not touched here: it follows the size the engine says it draws
+    /// at (see `vulkan.Surface.acquire`), which is what the metrics below tell
+    /// it, so there is nothing to hand over between threads.
+    fn applyResize(self: *Window, eng: *engine.Engine) void {
+        if (!self.resized) return;
+        self.resized = false;
+
+        std.debug.print("fembed: window resized to {}x{}\n", .{ self.width, self.height });
+        eng.sendWindowMetrics(self.width, self.height, self.pixel_ratio);
+        // A window metrics event makes the framework relayout and schedule a
+        // frame on its own; asking for one anyway means a resize can never be
+        // left unpainted.
+        eng.scheduleFrame();
     }
 
     pub fn destroy(self: *Window) void {
@@ -277,9 +317,37 @@ pub const Window = struct {
 
     fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, self: *Window) void {
         switch (event) {
-            .configure => {},
+            .configure => |configure| {
+                // An unchanged size needs nothing: the engine was told the same
+                // size already, and any rebuild it owes is driven by the size it
+                // reports per frame.
+                const size = configuredSize(configure.width, configure.height) orelse return;
+                if (size[0] == self.width and size[1] == self.height) return;
+
+                self.width = size[0];
+                self.height = size[1];
+                self.resized = true;
+            },
             .close => self.running = false,
             else => {},
         }
     }
+
+    /// The size a configure is asking for, or null when it leaves the choice to
+    /// us: a zero (or negative, which no compositor should send) width or
+    /// height means exactly that.
+    fn configuredSize(width: i32, height: i32) ?[2]u32 {
+        if (width <= 0 or height <= 0) return null;
+        return .{ @intCast(width), @intCast(height) };
+    }
 };
+
+test "a configure that leaves the size to us is not a resize" {
+    const testing = std.testing;
+
+    try testing.expectEqual(@as(?[2]u32, null), Window.configuredSize(0, 0));
+    try testing.expectEqual(@as(?[2]u32, null), Window.configuredSize(0, 600));
+    try testing.expectEqual(@as(?[2]u32, null), Window.configuredSize(800, 0));
+    try testing.expectEqual(@as(?[2]u32, null), Window.configuredSize(-1, 1080));
+    try testing.expectEqual(@as(?[2]u32, .{ 1024, 768 }), Window.configuredSize(1024, 768));
+}

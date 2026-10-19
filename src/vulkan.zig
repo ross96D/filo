@@ -122,14 +122,43 @@ pub const Context = struct {
     }
 };
 
+/// A swapchain and the images it holds. `Surface` swaps one of these out for
+/// another when the window changes size.
+const Swapchain = struct {
+    handle: vk.SwapchainKHR,
+    format: vk.Format,
+    images: []vk.Image,
+    /// Extent it was created with. The driver may clamp what we ask for, so this
+    /// is not necessarily the size the engine draws at.
+    extent: vk.Extent2D,
+
+    fn destroy(self: Swapchain, ctx: *Context) void {
+        ctx.vkd.destroySwapchainKHR(ctx.device, self.handle, null);
+        ctx.allocator.free(self.images);
+    }
+};
+
+/// What the engine needs to draw a frame: the image to render into, and the
+/// format it was created with.
+pub const Frame = struct {
+    image: vk.Image,
+    format: vk.Format,
+};
+
 pub const Surface = struct {
     ctx: *Context,
     surface: vk.SurfaceKHR,
-    swapchain: vk.SwapchainKHR,
-    format: vk.Format,
-    images: []vk.Image,
-    width: u32,
-    height: u32,
+    /// The swapchain to draw into. Null only between a failed rebuild and the
+    /// next frame's attempt at one: with no swapchain there is nothing to draw
+    /// into, so that frame is dropped.
+    swapchain: ?Swapchain = null,
+    /// The size the engine last drew at, from `FlutterFrameInfo`. Tracked
+    /// separately from `Swapchain.extent` so that a clamped extent cannot make
+    /// every frame rebuild with the same result.
+    frame_size: vk.Extent2D,
+    /// Set when the swapchain no longer matches the surface: a suboptimal
+    /// present, or an out-of-date acquire. It is rebuilt on the next frame.
+    stale: bool = false,
 
     pub fn create(ctx: *Context, wl_display: *anyopaque, wl_surface: *anyopaque, width: u32, height: u32) !Surface {
         const surface = try ctx.vki.createWaylandSurfaceKHR(ctx.instance, &.{
@@ -138,14 +167,59 @@ pub const Surface = struct {
         }, null);
         errdefer ctx.vki.destroySurfaceKHR(ctx.instance, surface, null);
 
-        const caps = try ctx.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.pdev, surface);
-        const format = try chooseSurfaceFormat(ctx, surface);
-        const present_mode: vk.PresentModeKHR = .fifo_khr;
-
-        const extent = vk.Extent2D{
-            .width = std.math.clamp(width, caps.min_image_extent.width, caps.max_image_extent.width),
-            .height = std.math.clamp(height, caps.min_image_extent.height, caps.max_image_extent.height),
+        const size = vk.Extent2D{ .width = width, .height = height };
+        return .{
+            .ctx = ctx,
+            .surface = surface,
+            .swapchain = try buildSwapchain(ctx, surface, size),
+            .frame_size = size,
         };
+    }
+
+    /// Make the swapchain match the size the engine is drawing at, if it does
+    /// not already (or if a previous frame found it stale). Runs at the start of
+    /// every frame, and does nothing at all when there is nothing to do.
+    fn resize(self: *Surface, size: vk.Extent2D) !void {
+        if (self.swapchain != null and !self.stale and
+            size.width == self.frame_size.width and size.height == self.frame_size.height) return;
+        // A zero-sized frame is not a size the compositor can have asked for,
+        // and not a valid swapchain: leave the current one in place.
+        if (size.width == 0 or size.height == 0) return;
+
+        // The old swapchain goes first: a driver rejects a second one for the
+        // same surface (`VK_ERROR_NATIVE_WINDOW_IN_USE_KHR`), which is what
+        // passing it as `oldSwapchain` avoids, but that way a failed create
+        // retires the old swapchain too, so it cannot be kept as a fallback
+        // either. Nothing is in flight here, `acquire` has waited for the device
+        // to go idle.
+        if (self.swapchain) |swapchain| swapchain.destroy(self.ctx);
+        self.swapchain = null;
+
+        const built = try buildSwapchain(self.ctx, self.surface, size);
+        // The driver may have picked a different size than the one asked for,
+        // and this is the size the surface will have, not the one the engine
+        // draws at: worth saying out loud.
+        if (built.extent.width != size.width or built.extent.height != size.height) {
+            std.debug.print("fembed: swapchain is {}x{}, not {}x{}\n", .{
+                built.extent.width,
+                built.extent.height,
+                size.width,
+                size.height,
+            });
+        }
+
+        self.swapchain = built;
+        self.frame_size = size;
+        self.stale = false;
+    }
+
+    /// Build a swapchain and the images it holds. The extent is clamped to what
+    /// the surface supports, so it can differ from `size`, which is what the
+    /// engine draws at.
+    fn buildSwapchain(ctx: *Context, surface: vk.SurfaceKHR, size: vk.Extent2D) !Swapchain {
+        const caps = try ctx.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.pdev, surface);
+        const extent = swapchainExtent(size, caps);
+        const format = try chooseSurfaceFormat(ctx, surface);
 
         var image_count = caps.min_image_count + 1;
         if (caps.max_image_count != 0 and image_count > caps.max_image_count) image_count = caps.max_image_count;
@@ -166,7 +240,7 @@ pub const Surface = struct {
             .image_sharing_mode = .exclusive,
             .pre_transform = caps.current_transform,
             .composite_alpha = .{ .opaque_khr = true },
-            .present_mode = present_mode,
+            .present_mode = .fifo_khr,
             .clipped = .true,
         }, null);
         errdefer ctx.vkd.destroySwapchainKHR(ctx.device, swapchain, null);
@@ -177,47 +251,77 @@ pub const Surface = struct {
         errdefer ctx.allocator.free(images);
         _ = try ctx.vkd.getSwapchainImagesKHR(ctx.device, swapchain, &n, images.ptr);
 
-        return .{
-            .ctx = ctx,
-            .surface = surface,
-            .swapchain = swapchain,
-            .format = format,
-            .images = images,
-            .width = extent.width,
-            .height = extent.height,
-        };
+        return .{ .handle = swapchain, .format = format, .images = images, .extent = extent };
     }
 
     pub fn destroy(self: *Surface) void {
-        self.ctx.vkd.destroySwapchainKHR(self.ctx.device, self.swapchain, null);
+        if (self.swapchain) |swapchain| swapchain.destroy(self.ctx);
         self.ctx.vki.destroySurfaceKHR(self.ctx.instance, self.surface, null);
-        self.ctx.allocator.free(self.images);
     }
 
-    /// Returns the index of the acquired swapchain image.
-    pub fn acquire(self: *Surface) !u32 {
-        try self.ctx.vkd.deviceWaitIdle(self.ctx.device);
-        const result = try self.ctx.vkd.acquireNextImageKHR(
-            self.ctx.device,
-            self.swapchain,
-            std.math.maxInt(u64),
-            .null,
-            .null,
-        );
-        return result.image_index;
+    /// Acquire an image for a frame the engine is drawing at `width`×`height`
+    /// (its `FlutterFrameInfo`). The swapchain is rebuilt first when that size
+    /// changed, or when a previous frame found it stale.
+    ///
+    /// This and `present` run on the engine's render thread, one frame at a
+    /// time, so none of this state needs to be locked against the event loop:
+    /// the loop only sends window metrics, it never touches the swapchain.
+    pub fn acquire(self: *Surface, width: u32, height: u32) !Frame {
+        const size = vk.Extent2D{ .width = width, .height = height };
+
+        var retried = false;
+        while (true) {
+            try self.resize(size);
+            const swapchain = self.swapchain orelse return error.NoSwapchain;
+
+            try self.ctx.vkd.deviceWaitIdle(self.ctx.device);
+            const acquired = self.ctx.vkd.acquireNextImageKHR(
+                self.ctx.device,
+                swapchain.handle,
+                std.math.maxInt(u64),
+                .null,
+                .null,
+            ) catch |err| switch (err) {
+                // The surface moved on without a configure telling us to (an
+                // output scale change, for instance): rebuild for the same size
+                // and try once more.
+                error.OutOfDateKHR => {
+                    if (retried) return err;
+                    retried = true;
+                    self.stale = true;
+                    continue;
+                },
+                else => return err,
+            };
+
+            // Usable for this frame, but not for the next one.
+            if (acquired.result == .suboptimal_khr) self.stale = true;
+            return .{ .image = swapchain.images[acquired.image_index], .format = swapchain.format };
+        }
     }
 
     pub fn present(self: *Surface, image: vk.Image) !void {
-        const index = for (self.images, 0..) |img, i| {
+        const swapchain = self.swapchain orelse return error.NoSwapchain;
+        const index = for (swapchain.images, 0..) |img, i| {
             if (img == image) break @as(u32, @intCast(i));
         } else return error.UnknownImage;
 
         const present_info = vk.PresentInfoKHR{
             .swapchain_count = 1,
-            .p_swapchains = @ptrCast(&self.swapchain),
+            .p_swapchains = @ptrCast(&swapchain.handle),
             .p_image_indices = @ptrCast(&index),
         };
-        _ = try self.ctx.vkd.queuePresentKHR(self.ctx.queue, &present_info);
+        const presented = self.ctx.vkd.queuePresentKHR(self.ctx.queue, &present_info) catch |err| switch (err) {
+            // The frame was not shown. The image belongs to a swapchain that is
+            // about to be rebuilt, so there is nothing left to present.
+            error.OutOfDateKHR => {
+                self.stale = true;
+                return err;
+            },
+            else => return err,
+        };
+
+        if (presented == .suboptimal_khr) self.stale = true;
     }
 
     fn chooseSurfaceFormat(ctx: *Context, surface: vk.SurfaceKHR) !vk.Format {
@@ -232,3 +336,32 @@ pub const Surface = struct {
         return formats[0].format;
     }
 };
+
+/// The extent to create a swapchain at: the size the engine is drawing at,
+/// clamped to what the surface supports. The Wayland compositor takes the
+/// surface size from the buffers we attach, and `current_extent` only reports
+/// the size of the last one, so it is not a size to resize to.
+fn swapchainExtent(size: vk.Extent2D, caps: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
+    return .{
+        .width = std.math.clamp(@max(size.width, 1), caps.min_image_extent.width, caps.max_image_extent.width),
+        .height = std.math.clamp(@max(size.height, 1), caps.min_image_extent.height, caps.max_image_extent.height),
+    };
+}
+
+fn expectExtent(expected: vk.Extent2D, actual: vk.Extent2D) !void {
+    try std.testing.expectEqual(expected.width, actual.width);
+    try std.testing.expectEqual(expected.height, actual.height);
+}
+
+test "the swapchain follows the frame size, clamped to what the surface supports" {
+    var caps = std.mem.zeroes(vk.SurfaceCapabilitiesKHR);
+    caps.min_image_extent = .{ .width = 2, .height = 2 };
+    caps.max_image_extent = .{ .width = 4096, .height = 4096 };
+
+    try expectExtent(.{ .width = 800, .height = 600 }, swapchainExtent(.{ .width = 800, .height = 600 }, caps));
+    // Never a zero-sized swapchain, even if the engine asks for one.
+    try expectExtent(.{ .width = 2, .height = 2 }, swapchainExtent(.{ .width = 0, .height = 0 }, caps));
+    // Outside the surface limits.
+    try expectExtent(.{ .width = 2, .height = 2 }, swapchainExtent(.{ .width = 1, .height = 1 }, caps));
+    try expectExtent(.{ .width = 4096, .height = 4096 }, swapchainExtent(.{ .width = 8000, .height = 6000 }, caps));
+}
