@@ -57,12 +57,12 @@ pub const PlatformHandler = struct {
             return;
         }
         const method = method_val.string;
-        const args = root.object.get("args");
+        const args = root.object.get("args") orelse codec.no_args;
 
         if (std.mem.eql(u8, method, "Clipboard.setData")) {
-            self.setData(args);
+            if (clipboardText(args)) |text| self.clipboard.setText(text);
         } else if (std.mem.eql(u8, method, "Clipboard.getData")) {
-            self.getData(handle, args);
+            self.getData(handle, clipboardFormat(args));
             return;
         } else if (std.mem.eql(u8, method, "Clipboard.hasStrings")) {
             self.hasStrings(handle);
@@ -74,20 +74,12 @@ pub const PlatformHandler = struct {
         self.eng.sendPlatformMessageResponse(handle, codec.json_success);
     }
 
-    /// `Clipboard.setData`, whose argument is a map with a `text` entry.
-    fn setData(self: *PlatformHandler, args: ?std.json.Value) void {
-        const a = args orelse return;
-        if (a != .object) return;
-        const text = a.object.get("text") orelse return;
-        self.clipboard.setText(if (text == .string) text.string else "");
-    }
-
-    /// `Clipboard.getData`, whose argument is the requested MIME type. Only text
-    /// is supported, matching the framework, which only ever asks for
-    /// `text/plain`.
-    fn getData(self: *PlatformHandler, handle: ?*const c.FlutterPlatformMessageResponseHandle, args: ?std.json.Value) void {
-        if (args) |a| {
-            if (a == .string and !clipboard.isTextMime(a.string)) {
+    /// `Clipboard.getData`: start a read for `format`, or fail if that is not a
+    /// text format. A null format means the framework did not name one, which
+    /// is the same as asking for text.
+    fn getData(self: *PlatformHandler, handle: ?*const c.FlutterPlatformMessageResponseHandle, format: ?[]const u8) void {
+        if (format) |mime| {
+            if (!clipboard.isTextMime(mime)) {
                 var buf: [128]u8 = undefined;
                 self.eng.sendPlatformMessageResponse(handle, codec.jsonError(&buf, "error", "unsupported clipboard format"));
                 return;
@@ -134,6 +126,32 @@ pub const PlatformHandler = struct {
         self.eng.sendPlatformMessageResponse(handle, out.items);
     }
 };
+
+/// The argument of `Clipboard.setData`: a map whose only entry is the text to
+/// put on the clipboard. `ClipboardData.text` is nullable and the framework
+/// sends it as JSON null, which counts as an empty text; a message with no text
+/// entry at all leaves the clipboard alone.
+fn clipboardText(args: std.json.Value) ?[]const u8 {
+    const map = switch (args) {
+        .object => |map| map,
+        else => return null,
+    };
+    const entry = map.get("text") orelse return null;
+    return switch (entry) {
+        .string => |text| text,
+        else => "",
+    };
+}
+
+/// The argument of `Clipboard.getData`: the requested format, as the bare
+/// string the framework sends, or null when it did not name one. Only text is
+/// supported, matching the framework, which only ever asks for `text/plain`.
+fn clipboardFormat(args: std.json.Value) ?[]const u8 {
+    return switch (args) {
+        .string => |format| format,
+        else => null,
+    };
+}
 
 /// Build the `Clipboard.getData` success envelope, `[{"text": "..."}]`.
 fn appendGetDataReply(out: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator, text: []const u8) !void {

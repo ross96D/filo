@@ -9,4 +9,5 @@ test {
     _ = @import("flutter/codec.zig");
     _ = @import("flutter/platform_handler.zig");
     _ = @import("flutter/text_input.zig");
+    _ = @import("flutter/types/text_input.zig");
 }

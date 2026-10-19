@@ -6,6 +6,10 @@ const channels = @import("channels.zig");
 /// null (`JSONMethodCodec` envelopes are always lists).
 pub const json_success: []const u8 = "[null]";
 
+/// Stand-in for the arguments of a method call that takes none: the framework
+/// omits `args` for those, which reads the same as a JSON null.
+pub const no_args: std.json.Value = .null;
+
 /// A successful `JSONMessageCodec` reply: a bare JSON value.
 pub const json_null: []const u8 = "null";
 
