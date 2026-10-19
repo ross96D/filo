@@ -1,5 +1,14 @@
 const std = @import("std");
 
+const table = @import("table.zig");
+
+// TODO:
+// add reciever     flutter/platform/SystemSound.play
+// add reciever     flutter/platform/exitApplication
+// add sender       flutter/platform/requestAppExit
+// add sender       flutter/system with {"type": "memoryPressure"}
+// add reciever     flutter/mousecursor
+
 /// The wire codec a platform channel speaks. Replies must be encoded with the
 /// codec the framework decodes with, otherwise the framework throws while
 /// decoding our response (`JSONMethodCodec` and `StandardMethodCodec` use
@@ -60,21 +69,52 @@ pub const platform_views_2 = Channel{ .name = "flutter/platform_views_2", .codec
 /// `SystemChannels.sensitiveContent`.
 pub const sensitive_content = Channel{ .name = "flutter/sensitivecontent", .codec = .standard_method };
 
-/// Channels that speak `JSONMethodCodec`. Every other channel defaults to
-/// `StandardMethodCodec`, which is the `MethodChannel` default.
-const json_channels = [_][]const u8{
-    text_input.name,
-    platform.name,
-    navigation.name,
-    skia.name,
-    undo_manager.name,
-    scribe.name,
+/// The handler that answers a channel's messages.
+pub const Handler = enum { text_input, platform };
+
+/// What to do with a message that arrives on a channel: which handler answers
+/// it, and the codec the framework decodes the reply with.
+pub const Route = struct {
+    /// The handler that answers, or null for a channel we only acknowledge.
+    handler: ?Handler = null,
+    codec: Codec = .standard_method,
 };
 
-/// The codec the framework decodes a channel's replies with.
-pub fn codecFor(name: []const u8) Codec {
-    for (json_channels) |json_name| {
-        if (std.mem.eql(u8, name, json_name)) return .json_method;
-    }
-    return .standard_method;
+/// Every channel we treat differently from the default: the ones that speak
+/// `JSONMethodCodec`, two of which we implement. Anything not listed here is not
+/// implemented and speaks `StandardMethodCodec`, which is the `MethodChannel`
+/// default. Each row takes its codec from the channel constant above it, so the
+/// two never drift apart.
+pub const routes = [_]table.Entry(Route){
+    .{ .name = text_input.name, .value = .{ .handler = .text_input, .codec = text_input.codec } },
+    .{ .name = platform.name, .value = .{ .handler = .platform, .codec = platform.codec } },
+    .{ .name = navigation.name, .value = .{ .codec = navigation.codec } },
+    .{ .name = skia.name, .value = .{ .codec = skia.codec } },
+    .{ .name = undo_manager.name, .value = .{ .codec = undo_manager.codec } },
+    .{ .name = scribe.name, .value = .{ .codec = scribe.codec } },
+};
+
+test "routes carry the handler and codec of each channel the framework sends" {
+    const testing = std.testing;
+
+    var routes_table = table.Table(Route).init(testing.allocator, &routes);
+    defer routes_table.deinit();
+
+    // The two channels we implement speak `JSONMethodCodec`.
+    const text_input_route = routes_table.get(text_input.name).?;
+    try testing.expectEqual(Handler.text_input, text_input_route.handler.?);
+    try testing.expectEqual(Codec.json_method, text_input_route.codec);
+
+    const platform_route = routes_table.get(platform.name).?;
+    try testing.expectEqual(Handler.platform, platform_route.handler.?);
+    try testing.expectEqual(Codec.json_method, platform_route.codec);
+
+    // A JSON channel we do not implement still carries its codec, so that the
+    // framework can decode the null reply we send it.
+    const undo_route = routes_table.get(undo_manager.name).?;
+    try testing.expectEqual(@as(?Handler, null), undo_route.handler);
+    try testing.expectEqual(Codec.json_method, undo_route.codec);
+
+    // Anything else is not ours to route.
+    try testing.expectEqual(@as(?Route, null), routes_table.get("flutter/bogus"));
 }

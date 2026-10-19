@@ -3,7 +3,12 @@ const std = @import("std");
 const c = @import("flutter");
 const engine = @import("../engine.zig");
 const clipboard = @import("../clipboard.zig");
+const channels = @import("channels.zig");
 const codec = @import("codec.zig");
+const table = @import("table.zig");
+const SystemSoundType = @import("types/system_sound.zig").SystemSoundType;
+const AppExitType = @import("types/exit.zig").AppExitType;
+const AppExitResponse = @import("types/exit.zig").AppExitResponse;
 
 /// Handles `SystemChannels.platform`, the JSON method channel the framework
 /// uses for the system clipboard, `SystemChrome`, `SystemSound`,
@@ -21,6 +26,43 @@ pub const PlatformHandler = struct {
     quit_flag: ?*bool = null,
     /// Response handle for an in-flight `Clipboard.getData`.
     pending_get: ?*const c.FlutterPlatformMessageResponseHandle = null,
+    /// Method name → what to do with it.
+    methods: table.Table(Method),
+
+    /// The methods on this channel this embedder acts on. Everything else the
+    /// framework sends here (SystemChrome, SystemSound, lifecycle
+    /// notifications, ...) is only acknowledged.
+    const Method = enum { set_data, get_data, has_strings, pop, play_sound, exit_app };
+
+    const method_table = [_]table.Entry(Method){
+        .{ .name = "Clipboard.setData", .value = .set_data },
+        .{ .name = "Clipboard.getData", .value = .get_data },
+        .{ .name = "Clipboard.hasStrings", .value = .has_strings },
+        .{ .name = "SystemNavigator.pop", .value = .pop },
+        .{ .name = "SystemSound.play", .value = .play_sound },
+        .{ .name = "System.exitApplication", .value = .exit_app },
+    };
+
+    /// Build the method table. The clipboard callback is registered by `attach`,
+    /// which has to run once the handler sits at its final address.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        eng: *engine.Engine,
+        clipboard_ptr: *clipboard.Clipboard,
+        quit_flag: ?*bool,
+    ) PlatformHandler {
+        return .{
+            .allocator = allocator,
+            .eng = eng,
+            .clipboard = clipboard_ptr,
+            .quit_flag = quit_flag,
+            .methods = table.Table(Method).init(allocator, &method_table),
+        };
+    }
+
+    pub fn deinit(self: *PlatformHandler) void {
+        self.methods.deinit();
+    }
 
     /// Register with the clipboard. Must be called once the handler is at its
     /// final address, because the callback keeps a pointer back to it.
@@ -37,40 +79,70 @@ pub const PlatformHandler = struct {
     }
 
     fn handlePlatform(self: *PlatformHandler, data: []const u8, handle: ?*const c.FlutterPlatformMessageResponseHandle) void {
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, data, .{}) catch {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
-            return;
-        };
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, data, .{}) catch return self.ack(handle.?);
         defer parsed.deinit();
 
         const root = parsed.value;
-        if (root != .object) {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
-            return;
-        }
-        const method_val = root.object.get("method") orelse {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
-            return;
-        };
-        if (method_val != .string) {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
-            return;
-        }
-        const method = method_val.string;
+        if (root != .object) return self.ack(handle.?);
+        const method_val = root.object.get("method") orelse return self.ack(handle.?);
+        if (method_val != .string) return self.ack(handle.?);
+        const method_name = method_val.string;
         const args = root.object.get("args") orelse codec.no_args;
 
-        if (std.mem.eql(u8, method, "Clipboard.setData")) {
-            if (clipboardText(args)) |text| self.clipboard.setText(text);
-        } else if (std.mem.eql(u8, method, "Clipboard.getData")) {
-            self.getData(handle, clipboardFormat(args));
-            return;
-        } else if (std.mem.eql(u8, method, "Clipboard.hasStrings")) {
-            self.hasStrings(handle);
-            return;
-        } else if (std.mem.eql(u8, method, "SystemNavigator.pop")) {
-            if (self.quit_flag) |flag| flag.* = false;
-        }
+        // Everything else the framework sends here (SystemChrome, SystemSound,
+        // lifecycle notifications, ...) is only acknowledged.
+        const method = self.methods.get(method_name) orelse return self.ack(handle.?);
 
+        switch (method) {
+            .set_data => if (clipboardText(args)) |text| self.clipboard.setText(text),
+            .get_data => {
+                self.getData(handle, clipboardFormat(args));
+                return;
+            },
+            .has_strings => {
+                self.hasStrings(handle);
+                return;
+            },
+            .pop => {
+                if (self.quit_flag) |flag| flag.* = false;
+            },
+            .play_sound => {
+                const soundType = SystemSoundType.fromString(args.string);
+                std.debug.print("TODO: play system sound {}\n", .{soundType});
+            },
+            .exit_app => {
+                const exit_type = AppExitType.fromString(args.object.get("type").?.string);
+                const exit_code = args.object.get("exitCode").?.integer;
+                std.debug.print("TODO: Use exit code when quiting {}\n", .{exit_code});
+                switch (exit_type) {
+                    .required => {
+                        if (self.quit_flag) |flag| flag.* = false;
+                    },
+                    .cancelable => {
+                        var buffer: [128]u8 = @splat(0);
+                        const formatted = std.mem.print(
+                            &buffer,
+                            "{{\"method\": \"System.requestAppExit\", \"args\": {{\"type\": \"{}\"}}}}",
+                            .{exit_type},
+                        ) catch unreachable;
+                        self.eng.sendPlatformMessage(
+                            channels.platform.name,
+                            formatted,
+                        );
+                    },
+                    .unknown => {
+                        if (self.quit_flag) |flag| flag.* = false;
+                    },
+                }
+            },
+        }
+        self.ack(handle.?);
+    }
+
+    /// Acknowledge a message with a null success, the reply the framework
+    /// expects from a shell that does not implement something: this channel is
+    /// an `OptionalMethodChannel`, so an error would surface as an exception.
+    fn ack(self: *PlatformHandler, handle: *const c.FlutterPlatformMessageResponseHandle) void {
         self.eng.sendPlatformMessageResponse(handle, codec.json_success);
     }
 
@@ -89,7 +161,7 @@ pub const PlatformHandler = struct {
         // Nothing to read, or a transfer is already in flight: answer with a
         // null result, which the framework turns into a null `ClipboardData`.
         if (!self.clipboard.hasText() or self.clipboard.receive() == null) {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
+            self.ack(handle.?);
             return;
         }
 
@@ -113,14 +185,14 @@ pub const PlatformHandler = struct {
         self.pending_get = null;
 
         const value = text orelse {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
+            self.ack(handle);
             return;
         };
 
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(self.allocator);
         appendGetDataReply(&out, self.allocator, value) catch {
-            self.eng.sendPlatformMessageResponse(handle, codec.json_success);
+            self.ack(handle);
             return;
         };
         self.eng.sendPlatformMessageResponse(handle, out.items);

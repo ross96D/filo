@@ -6,8 +6,11 @@
 
 test {
     _ = @import("clipboard.zig");
+    _ = @import("flutter/channels.zig");
     _ = @import("flutter/codec.zig");
+    _ = @import("flutter/platform_channel.zig");
     _ = @import("flutter/platform_handler.zig");
+    _ = @import("flutter/table.zig");
     _ = @import("flutter/text_input.zig");
     _ = @import("flutter/types/text_input.zig");
 }

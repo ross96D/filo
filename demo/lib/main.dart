@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -13,7 +15,8 @@ class DemoApp extends StatefulWidget {
   State<DemoApp> createState() => _DemoAppState();
 }
 
-class _DemoAppState extends State<DemoApp> {
+class _DemoAppState extends State<DemoApp> with WidgetsBindingObserver {
+  bool _shouldExit = false;
   int _clicks = 0;
   final TextEditingController _controller = TextEditingController();
 
@@ -49,6 +52,29 @@ class _DemoAppState extends State<DemoApp> {
     print('[demo] clipboard hasStrings: ${await Clipboard.hasStrings()}');
   }
 
+  Future<void> _quit() async {
+    final AppExitType exitType = _shouldExit ? AppExitType.required : AppExitType.cancelable;
+    print('[demo] quit app');
+    final response = await ServicesBinding.instance.exitApplication(exitType);
+    print('[demo] quit app response $response');
+  }
+
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    print("[demo] request app exit");
+    return AppExitResponse.exit;
+  }
+
+  void _radioChanged(bool? value) {
+    value ??= true;
+    if (_shouldExit == value) {
+      return;
+    }
+    setState(() {
+      _shouldExit = value!;
+    });
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -66,16 +92,12 @@ class _DemoAppState extends State<DemoApp> {
             padding: const EdgeInsets.all(32),
             child: Column(
               mainAxisSize: MainAxisSize.min,
+              spacing: 12,
               children: [
                 const Text(
                   'fembed',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 40,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(color: Colors.white, fontSize: 40, fontWeight: FontWeight.bold),
                 ),
-                const SizedBox(height: 20),
                 TextField(
                   controller: _controller,
                   autofocus: true,
@@ -91,12 +113,10 @@ class _DemoAppState extends State<DemoApp> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 20),
                 Text(
                   'clicks: $_clicks',
                   style: const TextStyle(color: Colors.white70, fontSize: 18),
                 ),
-                const SizedBox(height: 12),
                 ElevatedButton(
                   onPressed: () {
                     setState(() => _clicks++);
@@ -104,22 +124,31 @@ class _DemoAppState extends State<DemoApp> {
                   },
                   child: const Text('Click me'),
                 ),
-                const SizedBox(height: 24),
+                RadioGroup<bool>(
+                  groupValue: _shouldExit,
+                  onChanged: (bool? value) => _radioChanged(value),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: 8,
+                    children: <Widget>[
+                      const RadioListTile<bool>(
+                        title: Text('Do Not Allow Exit', style: TextStyle(color: Colors.white70)),
+                        value: false,
+                      ),
+                      const RadioListTile<bool>(
+                        title: Text('Allow Exit', style: TextStyle(color: Colors.white70)),
+                        value: true,
+                      ),
+                      ElevatedButton(onPressed: _quit, child: const Text('Quit')),
+                    ],
+                  ),
+                ),
                 Wrap(
                   spacing: 12,
                   children: [
-                    ElevatedButton(
-                      onPressed: _copy,
-                      child: const Text('Copy'),
-                    ),
-                    ElevatedButton(
-                      onPressed: _paste,
-                      child: const Text('Paste'),
-                    ),
-                    ElevatedButton(
-                      onPressed: _hasStrings,
-                      child: const Text('Has strings'),
-                    ),
+                    ElevatedButton(onPressed: _copy, child: const Text('Copy')),
+                    ElevatedButton(onPressed: _paste, child: const Text('Paste')),
+                    ElevatedButton(onPressed: _hasStrings, child: const Text('Has strings')),
                   ],
                 ),
               ],

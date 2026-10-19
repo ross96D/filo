@@ -23,7 +23,7 @@ const pixel_ratio = 1.0;
 const App = struct {
     view: VulkanView,
     engine: ?*engine.Engine = null,
-    channels: platform_channel.Registry = .{},
+    channels: platform_channel.Registry,
 };
 
 const VulkanView = struct {
@@ -122,7 +122,9 @@ pub fn main(init: std.process.Init) !void {
             .ctx = ctx,
             .surface = try vulkan.Surface.create(&ctx, @ptrCast(win.display), @ptrCast(win.surface), width, height),
         },
+        .channels = platform_channel.Registry.init(allocator),
     };
+    defer app.channels.deinit();
     defer app.view.surface.destroy();
 
     const renderer = app.view.rendererConfig();
@@ -141,12 +143,8 @@ pub fn main(init: std.process.Init) !void {
     try win.setupInput(&inp);
 
     // `setupInput` creates the clipboard, which needs a seat to exist.
-    var ph = platform_handler.PlatformHandler{
-        .allocator = allocator,
-        .eng = eng,
-        .clipboard = win.clipboard.?,
-        .quit_flag = &win.running,
-    };
+    var ph = platform_handler.PlatformHandler.init(allocator, eng, win.clipboard.?, &win.running);
+    defer ph.deinit();
     ph.attach();
     app.channels.platform = &ph;
 

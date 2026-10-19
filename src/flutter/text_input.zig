@@ -5,6 +5,7 @@ const xkb = @import("xkb");
 const engine = @import("../engine.zig");
 const channels = @import("channels.zig");
 const codec = @import("codec.zig");
+const table = @import("table.zig");
 const types = @import("types/text_input.zig");
 
 const KEY_RETURN: u32 = @intCast(xkb.XKB_KEY_Return);
@@ -45,13 +46,54 @@ pub const TextInput = struct {
     /// buffer is owned here and `editingValue` hands out a view of it.
     text: std.ArrayListUnmanaged(u8) = .empty,
     selection: types.TextSelection = types.TextSelection.invalid,
+    /// Method name → what to do with it.
+    methods: table.Table(Method),
+
+    /// The methods the framework sends on `flutter/textinput`. The ones this
+    /// embedder acts on have their own tag; the rest are accepted and
+    /// acknowledged without doing anything, which is what a shell without an
+    /// IME, an on-screen keyboard or autofill can honestly answer.
+    const Method = enum {
+        set_client,
+        clear_client,
+        set_editing_state,
+        update_config,
+        ignore,
+    };
+
+    /// Every method this channel answers. Names that are not listed are reported
+    /// as unimplemented, so drift in the framework shows up instead of being
+    /// swallowed.
+    const method_table = [_]table.Entry(Method){
+        .{ .name = "TextInput.setClient", .value = .set_client },
+        .{ .name = "TextInput.clearClient", .value = .clear_client },
+        .{ .name = "TextInput.setEditingState", .value = .set_editing_state },
+        .{ .name = "TextInput.updateConfig", .value = .update_config },
+        // Cropping, styling, autofill and IME plumbing.
+        .{ .name = "TextInput.show", .value = .ignore },
+        .{ .name = "TextInput.hide", .value = .ignore },
+        .{ .name = "TextInput.setEditableSizeAndTransform", .value = .ignore },
+        .{ .name = "TextInput.setMarkedTextRect", .value = .ignore },
+        .{ .name = "TextInput.setCaretRect", .value = .ignore },
+        .{ .name = "TextInput.setSelectionRects", .value = .ignore },
+        .{ .name = "TextInput.setStyle", .value = .ignore },
+        .{ .name = "TextInput.requestAutofill", .value = .ignore },
+        .{ .name = "TextInput.finishAutofillContext", .value = .ignore },
+        .{ .name = "TextInput.setPlatformViewClient", .value = .ignore },
+        .{ .name = "TextInput.startLiveTextInput", .value = .ignore },
+    };
 
     pub fn init(allocator: std.mem.Allocator, eng: *engine.Engine) TextInput {
-        return .{ .allocator = allocator, .eng = eng };
+        return .{
+            .allocator = allocator,
+            .eng = eng,
+            .methods = table.Table(Method).init(allocator, &method_table),
+        };
     }
 
     pub fn deinit(self: *TextInput) void {
         self.text.deinit(self.allocator);
+        self.methods.deinit();
     }
 
     /// The editing state as the framework models it, borrowing the buffer.
@@ -93,49 +135,42 @@ pub const TextInput = struct {
             self.respondError(handle, "invalid method");
             return;
         }
-        const method = method_value.string;
+        const method_name = method_value.string;
         const args = message.get("args") orelse codec.no_args;
+
+        const method = self.methods.get(method_name) orelse {
+            self.respondUnimplemented(handle, method_name);
+            return;
+        };
 
         // Every method's arguments are decoded here, so that the handlers below
         // only ever see the mirrored types.
-        if (std.mem.eql(u8, method, "TextInput.setClient")) {
-            var request = SetClientArgs.decode(self.allocator, args) catch {
-                self.respondError(handle, "invalid setClient");
-                return;
-            };
-            defer request.deinit(self.allocator);
-            self.setClient(request.client_id, request.config);
-        } else if (std.mem.eql(u8, method, "TextInput.clearClient")) {
-            self.clearClient();
-        } else if (std.mem.eql(u8, method, "TextInput.setEditingState")) {
-            const state = types.TextEditingValue.fromJson(args) catch {
-                self.respondError(handle, "invalid editing state");
-                return;
-            };
-            self.setEditingState(state);
-        } else if (std.mem.eql(u8, method, "TextInput.updateConfig")) {
-            var config = types.TextInputConfiguration.fromJson(self.allocator, args) catch {
-                self.respondError(handle, "invalid config");
-                return;
-            };
-            defer config.deinit(self.allocator);
-            self.applyConfig(config);
-        } else if (std.mem.eql(u8, method, "TextInput.show") or
-            std.mem.eql(u8, method, "TextInput.hide") or
-            std.mem.eql(u8, method, "TextInput.setEditableSizeAndTransform") or
-            std.mem.eql(u8, method, "TextInput.setMarkedTextRect") or
-            std.mem.eql(u8, method, "TextInput.setCaretRect") or
-            std.mem.eql(u8, method, "TextInput.setSelectionRects") or
-            std.mem.eql(u8, method, "TextInput.setStyle") or
-            std.mem.eql(u8, method, "TextInput.requestAutofill") or
-            std.mem.eql(u8, method, "TextInput.finishAutofillContext") or
-            std.mem.eql(u8, method, "TextInput.setPlatformViewClient") or
-            std.mem.eql(u8, method, "TextInput.startLiveTextInput"))
-        {
-            // Accepted no-ops.
-        } else {
-            self.respondUnimplemented(handle, method);
-            return;
+        switch (method) {
+            .set_client => {
+                var request = SetClientArgs.decode(self.allocator, args) catch {
+                    self.respondError(handle, "invalid setClient");
+                    return;
+                };
+                defer request.deinit(self.allocator);
+                self.setClient(request.client_id, request.config);
+            },
+            .clear_client => self.clearClient(),
+            .set_editing_state => {
+                const state = types.TextEditingValue.fromJson(args) catch {
+                    self.respondError(handle, "invalid editing state");
+                    return;
+                };
+                self.setEditingState(state);
+            },
+            .update_config => {
+                var config = types.TextInputConfiguration.fromJson(self.allocator, args) catch {
+                    self.respondError(handle, "invalid config");
+                    return;
+                };
+                defer config.deinit(self.allocator);
+                self.applyConfig(config);
+            },
+            .ignore => {},
         }
 
         self.eng.sendPlatformMessageResponse(handle, codec.json_success);
@@ -402,6 +437,19 @@ test "multiline enter inserts a newline, updateConfig applies, read-only ignores
     feed(&ti, "{\"method\":\"TextInput.clearClient\"}");
     try testing.expect(!ti.has_client);
     try testing.expectEqual(@as(usize, 0), ti.text.items.len);
+}
+
+test "an unknown method is reported as unimplemented" {
+    const testing = std.testing;
+    testReset();
+
+    var eng = testEngine();
+    var ti = TextInput.init(testing.allocator, &eng);
+    defer ti.deinit();
+
+    // Drift in the framework shows up instead of being silently swallowed.
+    feed(&ti, "{\"method\":\"TextInput.bogus\"}");
+    try testing.expectEqualStrings("[\"error\",\"TextInput.bogus not implemented\",null]", testResponded());
 }
 
 fn testEngine() engine.Engine {
