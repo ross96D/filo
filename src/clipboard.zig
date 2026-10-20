@@ -1,7 +1,11 @@
 const std = @import("std");
 
+const ev = @import("zio").ev;
+
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
+
+const Context = @import("context.zig").Context;
 
 /// Text MIME types this clipboard advertises as a source, in the order we
 /// prefer them when reading someone else's selection.
@@ -49,9 +53,10 @@ fn bestMimeFromMask(mask: u32) ?[*:0]const u8 {
 /// same client: after a copy the compositor echoes the selection back to us, so
 /// a paste in our own app is answered by our own `wl_data_source`.
 pub const Clipboard = struct {
-    allocator: std.mem.Allocator,
-    display: *wl.Display,
-    manager: *wl.DataDeviceManager,
+    /// The globals the clipboard's callbacks reach: the allocator for its
+    /// buffers, the loop for the transfer probe, and the connection (its data
+    /// device manager, device, and display).
+    ctx: *Context,
     device: *wl.DataDevice,
 
     /// Serial of the most recent input event. `set_selection` is only honoured
@@ -75,19 +80,14 @@ pub const Clipboard = struct {
     pending_buf: std.ArrayListUnmanaged(u8) = .empty,
     on_receive: ?ReceiveCallback = null,
     receive_ctx: ?*anyopaque = null,
+    /// Watches `pending_fd` while a transfer is in flight.
+    poll: ev.PipePoll = .init(-1, .read),
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        display: *wl.Display,
-        manager: *wl.DataDeviceManager,
-        seat: *wl.Seat,
-    ) !*Clipboard {
-        const device = try manager.getDataDevice(seat);
-        const self = try allocator.create(Clipboard);
+    pub fn init(ctx: *Context, seat: *wl.Seat) !*Clipboard {
+        const device = try ctx.conn.data_device_manager.getDataDevice(seat);
+        const self = try ctx.allocator.create(Clipboard);
         self.* = .{
-            .allocator = allocator,
-            .display = display,
-            .manager = manager,
+            .ctx = ctx,
             .device = device,
         };
         device.setListener(*Clipboard, deviceListener, self);
@@ -96,7 +96,7 @@ pub const Clipboard = struct {
 
     pub fn deinit(self: *Clipboard) void {
         if (self.pending_fd) |fd| _ = std.os.linux.close(fd);
-        self.pending_buf.deinit(self.allocator);
+        self.pending_buf.deinit(self.ctx.allocator);
         if (self.selection) |offer| offer.destroy();
         if (self.source) |source| source.destroy();
         if (self.device.getVersion() >= 2) {
@@ -104,8 +104,8 @@ pub const Clipboard = struct {
         } else {
             @as(*wl.Proxy, @ptrCast(self.device)).destroy();
         }
-        self.source_text.deinit(self.allocator);
-        self.allocator.destroy(self);
+        self.source_text.deinit(self.ctx.allocator);
+        self.ctx.allocator.destroy(self);
     }
 
     /// Record the serial of an input event so `set_selection` is accepted.
@@ -116,16 +116,16 @@ pub const Clipboard = struct {
     /// Publish `text` as the selection.
     pub fn setText(self: *Clipboard, text: []const u8) void {
         self.source_text.clearRetainingCapacity();
-        self.source_text.appendSlice(self.allocator, text) catch return;
+        self.source_text.appendSlice(self.ctx.allocator, text) catch return;
 
         if (self.source == null) {
-            const source = self.manager.createDataSource() catch return;
+            const source = self.ctx.conn.data_device_manager.createDataSource() catch return;
             for (mimes) |mime| source.offer(mime);
             source.setListener(*Clipboard, sourceListener, self);
             self.source = source;
         }
         self.device.setSelection(self.source.?, self.serial);
-        _ = self.display.flush();
+        _ = self.ctx.conn.display.flush();
     }
 
     /// Whether the current selection offers text we can read.
@@ -133,41 +133,47 @@ pub const Clipboard = struct {
         return self.selection != null and bestMimeFromMask(self.selection_mask) != null;
     }
 
-    /// The read end of an in-flight transfer, to be added to the event loop's
-    /// poll set. `null` when nothing is in flight.
-    pub fn pollFd(self: *const Clipboard) ?std.posix.fd_t {
-        return self.pending_fd;
-    }
-
-    /// Start reading the selection. Returns the read end of a pipe that the
-    /// caller must poll and feed to `pump`, or `null` when there is nothing to
-    /// read or a transfer is already in flight.
-    pub fn receive(self: *Clipboard) ?std.posix.fd_t {
-        if (self.pending_fd != null) return null;
-        const offer = self.selection orelse return null;
-        const mime = bestMimeFromMask(self.selection_mask) orelse return null;
+    /// Start reading the selection. Returns false when there is nothing to
+    /// read or a transfer is already in flight; the transfer then completes
+    /// from the event loop.
+    pub fn receive(self: *Clipboard) bool {
+        if (self.pending_fd != null) return false;
+        const offer = self.selection orelse return false;
+        const mime = bestMimeFromMask(self.selection_mask) orelse return false;
 
         var fds: [2]std.posix.fd_t = undefined;
-        if (std.os.linux.errno(std.os.linux.pipe2(&fds, .{ .NONBLOCK = true, .CLOEXEC = true })) != .SUCCESS) return null;
+        if (std.os.linux.errno(std.os.linux.pipe2(&fds, .{ .NONBLOCK = true, .CLOEXEC = true })) != .SUCCESS) return false;
 
         offer.receive(mime, fds[1]);
         // The write end must stay open (and valid) until the request has been
         // flushed: libwayland only hands the descriptor to the kernel when the
         // request is actually sent.
-        if (self.display.flush() != .SUCCESS) {
+        if (self.ctx.conn.display.flush() != .SUCCESS) {
+            // TODO 3: maybe we could do better if it fails with EWOULDBLOCK or EAGAIN
             _ = std.os.linux.close(fds[1]);
             _ = std.os.linux.close(fds[0]);
-            return null;
+            return false;
         }
         _ = std.os.linux.close(fds[1]);
 
         self.pending_fd = fds[0];
         self.pending_buf.clearRetainingCapacity();
-        return fds[0];
+        // Any event retires the transfer: readable, end-of-file (the source
+        // closed without writing, i.e. empty text), or an error.
+        self.poll = .init(fds[0], .read);
+        self.poll.c.userdata = self;
+        self.poll.c.callback = onReadable;
+        self.ctx.loop.add(&self.poll.c);
+        return true;
     }
 
-    /// Advance an in-flight receive. Call whenever `pollFd` is readable.
-    pub fn pump(self: *Clipboard) void {
+    fn onReadable(_: *ev.Loop, c: *ev.Completion) void {
+        const self: *Clipboard = @ptrCast(@alignCast(c.userdata.?));
+        self.pump();
+    }
+
+    /// Advance an in-flight receive until it would block.
+    fn pump(self: *Clipboard) void {
         const fd = self.pending_fd orelse return;
         var buf: [4096]u8 = undefined;
         while (true) {
@@ -182,7 +188,7 @@ pub const Clipboard = struct {
                 self.finish(self.pending_buf.items);
                 return;
             }
-            self.pending_buf.appendSlice(self.allocator, buf[0..n]) catch {
+            self.pending_buf.appendSlice(self.ctx.allocator, buf[0..n]) catch {
                 self.finish(null);
                 return;
             };

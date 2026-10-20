@@ -97,110 +97,104 @@ class _DemoAppState extends State<DemoApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      showPerformanceOverlay: true,
+      showPerformanceOverlay: false,
       home: Scaffold(
         backgroundColor: const Color(0xFF223355),
-        body: ShowFPS(
-          alignment: Alignment.topRight,
-          visible: true,
-          showChart: false,
-          borderRadius: BorderRadius.all(Radius.circular(5)),
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                spacing: 6,
-                children: [
-                  const Text(
-                    'fembed',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 6,
+              children: [
+                const Text(
+                  'fembed',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                TextField(
+                  controller: _controller,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.white, fontSize: 9),
+                  decoration: const InputDecoration(
+                    hintText: 'type here...',
+                    hintStyle: TextStyle(color: Colors.white38),
+                    enabledBorder: UnderlineInputBorder(
+                      borderSide: BorderSide(color: Colors.white24),
+                    ),
+                    focusedBorder: UnderlineInputBorder(
+                      borderSide: BorderSide(color: Colors.white70),
                     ),
                   ),
-                  TextField(
-                    controller: _controller,
-                    autofocus: true,
-                    style: const TextStyle(color: Colors.white, fontSize: 9),
-                    decoration: const InputDecoration(
-                      hintText: 'type here...',
-                      hintStyle: TextStyle(color: Colors.white38),
-                      enabledBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: Colors.white24),
-                      ),
-                      focusedBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: Colors.white70),
-                      ),
-                    ),
-                  ),
-                  Text(
-                    'clicks: $_clicks',
-                    style: const TextStyle(color: Colors.white70, fontSize: 9),
-                  ),
-                  // Under `home`, so this context has the app's MediaQuery: the
-                  // one from `MaterialApp` is above this widget.
-                  Builder(
-                    builder: (BuildContext context) {
-                      final Size size = MediaQuery.sizeOf(context);
-                      return Text(
-                        'size: ${size.width.round()}x${size.height.round()}',
-                        style: const TextStyle(color: Colors.white70, fontSize: 9),
-                      );
-                    },
-                  ),
-                  ElevatedButton(
-                    onPressed: () {
-                      setState(() => _clicks++);
-                      print('[demo] tap $_clicks');
-                    },
-                    child: const Text('Click me', style: TextStyle(fontSize: 9)),
-                  ),
-                  RadioGroup<bool>(
-                    groupValue: _shouldExit,
-                    onChanged: (bool? value) => _radioChanged(value),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      spacing: 8,
-                      children: <Widget>[
-                        const RadioListTile<bool>(
-                          title: Text(
-                            'Do Not Allow Exit',
-                            style: TextStyle(color: Colors.white70, fontSize: 9),
-                          ),
-                          value: false,
+                ),
+                Text(
+                  'clicks: $_clicks',
+                  style: const TextStyle(color: Colors.white70, fontSize: 9),
+                ),
+                // Under `home`, so this context has the app's MediaQuery: the
+                // one from `MaterialApp` is above this widget.
+                Builder(
+                  builder: (BuildContext context) {
+                    final Size size = MediaQuery.sizeOf(context);
+                    return Text(
+                      'size: ${size.width.round()}x${size.height.round()}',
+                      style: const TextStyle(color: Colors.white70, fontSize: 9),
+                    );
+                  },
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() => _clicks++);
+                    print('[demo] tap $_clicks');
+                  },
+                  child: const Text('Click me', style: TextStyle(fontSize: 9)),
+                ),
+                RadioGroup<bool>(
+                  groupValue: _shouldExit,
+                  onChanged: (bool? value) => _radioChanged(value),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    spacing: 8,
+                    children: <Widget>[
+                      const RadioListTile<bool>(
+                        title: Text(
+                          'Do Not Allow Exit',
+                          style: TextStyle(color: Colors.white70, fontSize: 9),
                         ),
-                        const RadioListTile<bool>(
-                          title: Text(
-                            'Allow Exit',
-                            style: TextStyle(color: Colors.white70, fontSize: 9),
-                          ),
-                          value: true,
+                        value: false,
+                      ),
+                      const RadioListTile<bool>(
+                        title: Text(
+                          'Allow Exit',
+                          style: TextStyle(color: Colors.white70, fontSize: 9),
                         ),
-                        ElevatedButton(onPressed: _quit, child: const Text('Quit', style: TextStyle(fontSize: 9))),
-                      ],
-                    ),
-                  ),
-                  Wrap(
-                    spacing: 6,
-                    children: [
-                      ElevatedButton(
-                        onPressed: _copy,
-                        child: const Text('Copy', style: TextStyle(fontSize: 9)),
+                        value: true,
                       ),
-                      ElevatedButton(
-                        onPressed: _paste,
-                        child: const Text('Paste', style: TextStyle(fontSize: 9)),
-                      ),
-                      ElevatedButton(
-                        onPressed: _hasStrings,
-                        child: const Text('Has strings', style: TextStyle(fontSize: 9)),
-                      ),
+                      ElevatedButton(onPressed: _quit, child: const Text('Quit', style: TextStyle(fontSize: 9))),
                     ],
                   ),
-                ],
-              ),
+                ),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _copy,
+                      child: const Text('Copy', style: TextStyle(fontSize: 9)),
+                    ),
+                    ElevatedButton(
+                      onPressed: _paste,
+                      child: const Text('Paste', style: TextStyle(fontSize: 9)),
+                    ),
+                    ElevatedButton(
+                      onPressed: _hasStrings,
+                      child: const Text('Has strings', style: TextStyle(fontSize: 9)),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
         ),

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const ev = @import("zio").ev;
+
 const c = @import("flutter");
 const engine = @import("../engine.zig");
 const clipboard = @import("../clipboard.zig");
@@ -22,8 +24,8 @@ pub const PlatformHandler = struct {
     allocator: std.mem.Allocator,
     eng: *engine.Engine,
     clipboard: *clipboard.Clipboard,
-    /// Cleared by `SystemNavigator.pop` to leave the event loop.
-    quit_flag: ?*bool = null,
+    /// Stopped when the framework asks to quit (`SystemNavigator.pop`).
+    io: ?*ev.Loop = null,
     /// Response handle for an in-flight `Clipboard.getData`.
     pending_get: ?*const c.FlutterPlatformMessageResponseHandle = null,
     /// Method name → what to do with it.
@@ -49,13 +51,13 @@ pub const PlatformHandler = struct {
         allocator: std.mem.Allocator,
         eng: *engine.Engine,
         clipboard_ptr: *clipboard.Clipboard,
-        quit_flag: ?*bool,
+        io: ?*ev.Loop,
     ) PlatformHandler {
         return .{
             .allocator = allocator,
             .eng = eng,
             .clipboard = clipboard_ptr,
-            .quit_flag = quit_flag,
+            .io = io,
             .methods = table.Table(Method).init(allocator, &method_table),
         };
     }
@@ -76,6 +78,10 @@ pub const PlatformHandler = struct {
         var data: []const u8 = &.{};
         if (msg.message != null) data = msg.message[0..msg.message_size];
         self.handlePlatform(data, msg.response_handle);
+    }
+
+    fn quit(self: *PlatformHandler) void {
+        if (self.io) |io| io.stop();
     }
 
     fn handlePlatform(self: *PlatformHandler, data: []const u8, handle: ?*const c.FlutterPlatformMessageResponseHandle) void {
@@ -103,9 +109,7 @@ pub const PlatformHandler = struct {
                 self.hasStrings(handle);
                 return;
             },
-            .pop => {
-                if (self.quit_flag) |flag| flag.* = false;
-            },
+            .pop => self.quit(),
             .play_sound => {
                 const soundType = SystemSoundType.fromString(args.string);
                 std.debug.print("TODO: play system sound {}\n", .{soundType});
@@ -115,9 +119,7 @@ pub const PlatformHandler = struct {
                 const exit_code = args.object.get("exitCode").?.integer;
                 std.debug.print("TODO: Use exit code when quiting {}\n", .{exit_code});
                 switch (exit_type) {
-                    .required => {
-                        if (self.quit_flag) |flag| flag.* = false;
-                    },
+                    .required => self.quit(),
                     .cancelable => {
                         var buffer: [128]u8 = @splat(0);
                         const formatted = std.mem.print(
@@ -130,9 +132,7 @@ pub const PlatformHandler = struct {
                             formatted,
                         );
                     },
-                    .unknown => {
-                        if (self.quit_flag) |flag| flag.* = false;
-                    },
+                    .unknown => self.quit(),
                 }
             },
         }
@@ -160,7 +160,7 @@ pub const PlatformHandler = struct {
 
         // Nothing to read, or a transfer is already in flight: answer with a
         // null result, which the framework turns into a null `ClipboardData`.
-        if (!self.clipboard.hasText() or self.clipboard.receive() == null) {
+        if (!self.clipboard.hasText() or !self.clipboard.receive()) {
             self.ack(handle.?);
             return;
         }

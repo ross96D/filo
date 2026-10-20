@@ -50,7 +50,6 @@ fn taskRunnerPostTask(task: c.FlutterTask, target_time_ns: u64, user_data: ?*any
 pub const default_frame_period_ns = 16_666_666;
 
 pub const Engine = struct {
-    allocator: std.mem.Allocator,
     lib: std.DynLib,
     procs: c.FlutterEngineProcTable,
     handle: c.FlutterEngine,
@@ -88,7 +87,6 @@ pub const Engine = struct {
         errdefer allocator.destroy(self);
 
         self.* = .{
-            .allocator = allocator,
             .lib = undefined,
             .procs = undefined,
             .handle = undefined,
@@ -318,8 +316,8 @@ pub const Engine = struct {
         _ = self.procs.SendPlatformMessageResponse.?(self.handle, handle, message.ptr, message.len);
     }
 
-    /// The fd to poll alongside the Wayland display fd in order to be woken up
-    /// when platform tasks are ready to run.
+    /// The fd the event loop watches in order to run platform tasks on the
+    /// main thread.
     pub fn getPlatformEventFd(self: *Engine) std.posix.fd_t {
         return self.task_runner.eventfd;
     }
@@ -340,7 +338,7 @@ pub const Engine = struct {
         tasks.deinit(std.heap.c_allocator);
     }
 
-    pub fn deinit(self: *Engine) void {
+    pub fn deinit(self: *Engine, allocator: std.mem.Allocator) void {
         // Every baton has to be returned before the engine shuts down, or it
         // leaks the wait for it. Nothing answers them any more by this point, so
         // treat the last one as a tick that has already happened.
@@ -358,6 +356,6 @@ pub const Engine = struct {
         _ = std.os.linux.close(self.task_runner.eventfd);
         self.task_runner.list.deinit(std.heap.c_allocator);
         self.vsync_batons.deinit(std.heap.c_allocator);
-        self.allocator.destroy(self);
+        allocator.destroy(self);
     }
 };

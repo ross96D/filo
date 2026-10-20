@@ -1,10 +1,16 @@
 const std = @import("std");
 
+const zio = @import("zio");
+const ev = zio.ev;
+
 const c = @import("flutter");
 const vk = @import("vulkan");
 
 const engine = @import("engine.zig");
+const connection = @import("connection.zig");
 const window = @import("window.zig");
+const frame_clock = @import("frame_clock.zig");
+const context = @import("context.zig");
 const manifest = @import("manifest.zig");
 const vulkan = @import("vulkan.zig");
 const input = @import("input.zig");
@@ -12,17 +18,24 @@ const text_input = @import("flutter/text_input.zig");
 const platform_handler = @import("flutter/platform_handler.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 
-/// Shared `user_data` for the engine: the Vulkan renderer callbacks need the
-/// view, while the platform message callback needs the channel registry. Both
-/// are reached from this one pointer, because the engine only takes a single
-/// `user_data`.
+/// The one struct the callbacks reach into: it is the engine's `user_data`
+/// (the Vulkan callbacks reach the view, the platform message callback the
+/// channels) and the loop sources' context (the display and task eventfd
+/// callbacks reach the globals in `ctx` plus the window and frame clock).
 const App = struct {
+    ctx: context.Context,
+    win: *window.Window,
+    frame: *frame_clock.FrameClock,
     view: VulkanView,
     /// Read by the vsync callback on the engine's raster thread, so it is
     /// written before the engine can ask for a frame and cleared under the same
     /// atomic when it is torn down.
     engine: std.atomic.Value(?*engine.Engine) = std.atomic.Value(?*engine.Engine).init(null),
     channels: platform_channel.Registry,
+
+    display_probe: ev.PipePoll = .init(-1, .read),
+    platform_probe: ev.PipePoll = .init(-1, .read),
+    err: ?anyerror = null,
 };
 
 const VulkanView = struct {
@@ -121,27 +134,77 @@ fn vsyncCallback(user_data: ?*anyopaque, baton: isize) callconv(.c) void {
     eng.requestVsync(baton);
 }
 
+/// The compositor has something for us. `dispatch` reads and dispatches it;
+/// the fd was reported readable, so the wait inside it returns at once.
+fn onDisplayReadable(loop: *ev.Loop, completion: *ev.Completion) void {
+    const app: *App = @ptrCast(@alignCast(completion.userdata.?));
+    app.ctx.conn.dispatch() catch |err| return fail(app, loop, err);
+    afterDispatch(app, loop);
+}
+
+/// The engine has platform tasks to run on this thread, or a vsync request to
+/// answer. Both are dealt with before returning to the loop.
+fn onPlatformWake(loop: *ev.Loop, completion: *ev.Completion) void {
+    const app: *App = @ptrCast(@alignCast(completion.userdata.?));
+    app.ctx.eng.drainPlatformTasks();
+    afterDispatch(app, loop);
+}
+
+/// Work the loop owes after any wake: a resize the compositor asked for, a tick
+/// the engine is waiting on, and the requests those queued on the connection.
+fn afterDispatch(self: *App, loop: *ev.Loop) void {
+    if (self.win.closing) {
+        loop.stop();
+        return;
+    }
+    self.win.applyResize(self.ctx.eng);
+    self.ctx.eng.frame_period_ns = self.ctx.conn.frame_period_ns;
+    self.frame.setPeriod(self.ctx.conn.frame_period_ns);
+    self.frame.service();
+    self.ctx.conn.flush();
+}
+
+/// A callback cannot hand an error back to the loop, so remember it and stop;
+/// `main` returns it once the loop comes back.
+fn fail(self: *App, loop: *ev.Loop, err: anyerror) void {
+    self.err = err;
+    loop.stop();
+}
+
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.arena.allocator();
+    const allocator = init.gpa;
 
     const cfg = try manifest.load(init.environ_map);
 
-    const win = try window.Window.create(allocator);
-    defer win.destroy();
-    try win.waitConfigured();
+    const conn = try connection.Connection.connect(allocator);
+    defer conn.deinit();
 
-    var ctx = try vulkan.Context.init(allocator, .{
+    const win = try conn.createWindow();
+    defer win.destroy(allocator);
+
+    try conn.waitReady(win);
+
+    // The one loop in the program. Everything below registers a descriptor or
+    // a timer with it and does its work from a callback.
+    var loop: zio.ev.Loop = undefined;
+    try loop.init(.{ .allocator = allocator });
+    defer loop.deinit();
+
+    var vk_ctx = try vulkan.Context.init(allocator, .{
         .validation = init.environ_map.get("FEMBED_VULKAN_VALIDATION") != null,
         .trace = init.environ_map.get("FEMBED_TRACE") != null,
     });
-    defer ctx.deinit();
+    defer vk_ctx.deinit();
 
     var app = App{
         .view = .{
-            .ctx = ctx,
-            .surface = try vulkan.Surface.create(&ctx, @ptrCast(win.display), @ptrCast(win.surface), win.width, win.height),
+            .ctx = vk_ctx,
+            .surface = try vulkan.Surface.create(&vk_ctx, @ptrCast(conn.display), @ptrCast(win.surface), win.width, win.height),
         },
         .channels = platform_channel.Registry.init(allocator),
+        .win = win,
+        .ctx = undefined,
+        .frame = undefined,
     };
     defer app.channels.deinit();
     defer app.view.surface.destroy();
@@ -157,8 +220,13 @@ pub fn main(init: std.process.Init) !void {
         platformMessageCallback,
         vsyncCallback,
     );
-    defer eng.deinit();
+    defer eng.deinit(allocator);
     app.channels.eng = eng;
+
+    // The globals are only complete once the engine exists.
+    app.ctx = .{ .allocator = allocator, .loop = &loop, .conn = conn, .eng = eng };
+    app.frame = try frame_clock.FrameClock.init(&app.ctx, win.surface, conn.frame_period_ns);
+    defer app.frame.deinit();
 
     var ti = text_input.TextInput.init(allocator, eng);
     defer ti.deinit();
@@ -166,10 +234,9 @@ pub fn main(init: std.process.Init) !void {
 
     var inp = try input.Input.init(eng, &ti);
     defer inp.deinit();
-    try win.setupInput(&inp);
+    try conn.bindSeat(&app.ctx, &inp);
 
-    // `setupInput` creates the clipboard, which needs a seat to exist.
-    var ph = platform_handler.PlatformHandler.init(allocator, eng, win.clipboard.?, &win.running);
+    var ph = platform_handler.PlatformHandler.init(allocator, eng, conn.clipboard.?, &loop);
     defer ph.deinit();
     ph.attach();
     app.channels.platform = &ph;
@@ -177,20 +244,34 @@ pub fn main(init: std.process.Init) !void {
     eng.sendWindowMetrics(win.width, win.height, win.pixel_ratio);
     // Without this the engine has no display at all and falls back for the
     // refresh rate it derives its frame budget from.
-    if (win.refresh_mhz != 0) {
+    if (conn.refresh_mhz != 0) {
         eng.notifyDisplayStartup(.{
-            .refresh_rate = @as(f64, @floatFromInt(win.refresh_mhz)) / 1000.0,
-            .width = win.display_width,
-            .height = win.display_height,
+            .refresh_rate = @as(f64, @floatFromInt(conn.refresh_mhz)) / 1000.0,
+            .width = conn.display_width,
+            .height = conn.display_height,
             .pixel_ratio = win.pixel_ratio,
         });
         std.debug.print("fembed: display {}x{} at {d:.3} Hz\n", .{
-            win.display_width,
-            win.display_height,
-            @as(f64, @floatFromInt(win.refresh_mhz)) / 1000.0,
+            conn.display_width,
+            conn.display_height,
+            @as(f64, @floatFromInt(conn.refresh_mhz)) / 1000.0,
         });
     }
 
+    // The loop's two sources: the display fd and the engine's task eventfd.
+    app.display_probe = .init(conn.getFd(), .read);
+    app.display_probe.c.userdata = &app;
+    app.display_probe.c.callback = onDisplayReadable;
+    app.display_probe.c.flags.rearm = true;
+    loop.add(&app.display_probe.c);
+
+    app.platform_probe = .init(eng.getPlatformEventFd(), .read);
+    app.platform_probe.c.userdata = &app;
+    app.platform_probe.c.callback = onPlatformWake;
+    app.platform_probe.c.flags.rearm = true;
+    loop.add(&app.platform_probe.c);
+
     std.debug.print("fembed: window created, entering event loop\n", .{});
-    try win.run(eng);
+    try loop.run();
+    if (app.err) |err| return err;
 }

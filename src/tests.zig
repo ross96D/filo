@@ -6,6 +6,8 @@
 
 test {
     _ = @import("clipboard.zig");
+    _ = @import("connection.zig");
+    _ = @import("frame_clock.zig");
     _ = @import("flutter/channels.zig");
     _ = @import("flutter/codec.zig");
     _ = @import("flutter/platform_channel.zig");
