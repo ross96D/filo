@@ -1,3 +1,4 @@
 flutter-engine
 zig-out
 .zig-cache
+zig-pkg

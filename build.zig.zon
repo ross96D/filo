@@ -10,8 +10,10 @@
         .vulkan_zig = .{
             .path = "vendor/vulkan-zig",
         },
-        .zart = .{
-            .path = "../zart"
+        .zart = .{ .path = "../zart" },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio#9a5585c1bea43cc44b41dcd189f93f756ce50f37",
+            .hash = "zio-0.19.0-xHbVVJAoLQAoY0Ql0kXoGwerqa188THXuJ71g3jIyk5M",
         },
     },
     .paths = .{
