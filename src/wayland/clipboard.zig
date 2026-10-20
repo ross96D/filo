@@ -5,7 +5,7 @@ const ev = @import("zio").ev;
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 
-const Context = @import("context.zig").Context;
+const Context = @import("../context.zig").Context;
 
 /// Text MIME types this clipboard advertises as a source, in the order we
 /// prefer them when reading someone else's selection.

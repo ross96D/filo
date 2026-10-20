@@ -4,7 +4,7 @@ const ev = @import("zio").ev;
 
 const c = @import("flutter");
 const engine = @import("../engine.zig");
-const clipboard = @import("../clipboard.zig");
+const clipboard = @import("../wayland/clipboard.zig");
 const channels = @import("channels.zig");
 const codec = @import("codec.zig");
 const table = @import("table.zig");

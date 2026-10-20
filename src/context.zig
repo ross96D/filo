@@ -2,7 +2,7 @@ const std = @import("std");
 
 const ev = @import("zio").ev;
 
-const connection = @import("connection.zig");
+const connection = @import("wayland/connection.zig");
 const engine = @import("engine.zig");
 
 /// The globals every callback can reach. A callback that needs only these

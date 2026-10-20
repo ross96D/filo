@@ -5,9 +5,9 @@
 //! inside the module path.
 
 test {
-    _ = @import("clipboard.zig");
-    _ = @import("connection.zig");
-    _ = @import("frame_clock.zig");
+    _ = @import("wayland/clipboard.zig");
+    _ = @import("wayland/connection.zig");
+    _ = @import("wayland/frame_clock.zig");
     _ = @import("flutter/channels.zig");
     _ = @import("flutter/codec.zig");
     _ = @import("flutter/platform_channel.zig");
@@ -16,5 +16,5 @@ test {
     _ = @import("flutter/text_input.zig");
     _ = @import("flutter/types/text_input.zig");
     _ = @import("vulkan.zig");
-    _ = @import("window.zig");
+    _ = @import("wayland/window.zig");
 }

@@ -6,7 +6,7 @@ const ev = zio.ev;
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 
-const Context = @import("context.zig").Context;
+const Context = @import("../context.zig").Context;
 
 /// The frame clock for one surface: it answers the engine's vsync requests from
 /// the compositor's `wl_surface.frame` callbacks, and hands the engine a tick

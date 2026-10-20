@@ -4,11 +4,11 @@ const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 
-const engine = @import("engine.zig");
-const input = @import("input.zig");
+const engine = @import("../engine.zig");
+const input = @import("../input.zig");
 const clipboard = @import("clipboard.zig");
 const window = @import("window.zig");
-const Context = @import("context.zig").Context;
+const Context = @import("../context.zig").Context;
 
 const Globals = struct {
     compositor: ?*wl.Compositor = null,

@@ -4,7 +4,7 @@ const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 
-const engine = @import("engine.zig");
+const engine = @import("../engine.zig");
 
 /// What a configure of 0×0 means: the compositor is leaving the size to us.
 const default_width = 800;

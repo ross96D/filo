@@ -7,9 +7,9 @@ const c = @import("flutter");
 const vk = @import("vulkan");
 
 const engine = @import("engine.zig");
-const connection = @import("connection.zig");
-const window = @import("window.zig");
-const frame_clock = @import("frame_clock.zig");
+const connection = @import("wayland/connection.zig");
+const window = @import("wayland/window.zig");
+const frame_clock = @import("wayland/frame_clock.zig");
 const context = @import("context.zig");
 const manifest = @import("manifest.zig");
 const vulkan = @import("vulkan.zig");
