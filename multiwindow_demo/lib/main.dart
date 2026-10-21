@@ -5,7 +5,10 @@ import 'package:flutter/services.dart';
 
 /// Window lifecycle requests to the embedder. The replies are acknowledgements
 /// only; a new [FlutterView] shows up through `didChangeMetrics`.
-const MethodChannel _windows = MethodChannel('fembed/windows', JSONMethodCodec());
+const MethodChannel _windows = MethodChannel(
+  'fembed/windows',
+  JSONMethodCodec(),
+);
 
 void main() {
   print('[multiwindow] main() entrypoint reached');
@@ -21,10 +24,17 @@ class MultiWindowApp extends StatefulWidget {
   State<MultiWindowApp> createState() => _MultiWindowAppState();
 }
 
-class _MultiWindowAppState extends State<MultiWindowApp> with WidgetsBindingObserver {
+class _MultiWindowAppState extends State<MultiWindowApp>
+    with WidgetsBindingObserver {
+  /// The set of view ids currently attached. Used to tell a window being added
+  /// or removed (which needs a rebuild to attach/detach a [View]) from a window
+  /// being resized (which the [View] handles itself and must not rebuild for).
+  Set<int> _viewIds = <int>{};
+
   @override
   void initState() {
     super.initState();
+    _viewIds = _currentViewIds();
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -34,19 +44,29 @@ class _MultiWindowAppState extends State<MultiWindowApp> with WidgetsBindingObse
     super.dispose();
   }
 
+  Set<int> _currentViewIds() => <int>{
+    for (final FlutterView view
+        in WidgetsBinding.instance.platformDispatcher.views)
+      view.viewId,
+  };
+
   @override
   void didChangeMetrics() {
     // The engine adds and removes views through PlatformDispatcher._addView and
-    // _removeView, both of which call onMetricsChanged. Rebuild the collection
-    // so the new View is attached (and a removed one is detached).
-    if (mounted) {
-      setState(() {});
-    }
+    // _removeView, both of which call onMetricsChanged, so this is the only
+    // notification for them. Rebuild the collection then, so the [View] is
+    // attached or detached. A resize also lands here, once per frame of a drag,
+    // but it leaves the set of views unchanged and the [View] updates itself:
+    // rebuilding the whole collection for it would only add jank.
+    final Set<int> ids = _currentViewIds();
+    if (ids.length == _viewIds.length && ids.containsAll(_viewIds)) return;
+    _viewIds = ids;
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<FlutterView> views = WidgetsBinding.instance.platformDispatcher.views.toList();
+    final views = WidgetsBinding.instance.platformDispatcher.views;
     return ViewCollection(
       views: <Widget>[
         for (final FlutterView view in views)
@@ -131,9 +151,10 @@ class _WindowPageState extends State<WindowPage> {
     final Size size = MediaQuery.sizeOf(context);
     final double dpr = MediaQuery.devicePixelRatioOf(context);
     final bool isPrimary = widget.viewId == 0;
-
     return Scaffold(
-      backgroundColor: isPrimary ? const Color(0xFF223355) : const Color(0xFF2F4A3A),
+      backgroundColor: isPrimary
+          ? const Color(0xFF223355)
+          : const Color(0xFF2F4A3A),
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(12),
@@ -187,7 +208,9 @@ class _WindowPageState extends State<WindowPage> {
                   ElevatedButton(
                     onPressed: () {
                       setState(() => _clicks++);
-                      print('[multiwindow] view ${widget.viewId} tap $_clicks');
+                      print(
+                        '[multiwindow] view ${widget.viewId} tap $_clicks',
+                      );
                     },
                     child: const Text('Click me'),
                   ),
