@@ -1,12 +1,12 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
-const instance_extensions = [_][*:0]const u8{
+pub const instance_extensions = [_][*:0]const u8{
     vk.instance_extensions.khr_surface.name.ptr,
     vk.instance_extensions.khr_wayland_surface.name.ptr,
 };
 
-const device_extensions = [_][*:0]const u8{
+pub const device_extensions = [_][*:0]const u8{
     vk.device_extensions.khr_swapchain.name.ptr,
 };
 

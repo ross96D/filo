@@ -6,6 +6,14 @@ const c = @import("flutter");
 
 const GetProcAddressesFn = *const fn (*c.FlutterEngineProcTable) callconv(.c) c.FlutterEngineResult;
 
+/// Command line switches handed to the engine. Impeller is opt-in: without
+/// `--enable-impeller` the engine renders with Skia.
+const skia_switches = [_][*:0]const u8{"fembed"};
+const impeller_switches = [_][*:0]const u8{
+    "fembed",
+    "--enable-impeller",
+};
+
 /// A task queue that bridges the engine's platform task runner to our main
 /// (Wayland) thread. The engine posts platform tasks from its own threads; we
 /// collect them here and execute them via `FlutterEngineRunTask` from the event
@@ -165,6 +173,12 @@ pub const Engine = struct {
         // Without this the engine paces itself with a hardcoded 60 Hz fallback,
         // no matter what the display can do.
         args.vsync_callback = vsync_callback;
+        const engine_switches: []const [*:0]const u8 = if (cfg.force_impeller)
+            &impeller_switches
+        else
+            &skia_switches;
+        args.command_line_argc = @intCast(engine_switches.len);
+        args.command_line_argv = @ptrCast(engine_switches.ptr);
 
         if (self.procs.Initialize.?(@intCast(c.FLUTTER_ENGINE_VERSION), renderer, &args, user_data, &self.handle) != 0)
             return error.EngineInitializeFailed;
