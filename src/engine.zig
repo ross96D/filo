@@ -83,6 +83,10 @@ pub const Engine = struct {
         allocator: std.mem.Allocator,
         cfg: manifest.Config,
         renderer: *const c.FlutterRendererConfig,
+        /// The engine renders each view into embedder-supplied backing stores
+        /// and asks us to composite them (`present_view_callback`) instead of
+        /// drawing straight into the swapchain.
+        compositor: *const c.FlutterCompositor,
         user_data: ?*anyopaque,
         /// Filled in before the engine is initialized: the vsync callback runs on
         /// the raster thread and reaches the engine through this slot, and the
@@ -173,6 +177,7 @@ pub const Engine = struct {
         // Without this the engine paces itself with a hardcoded 60 Hz fallback,
         // no matter what the display can do.
         args.vsync_callback = vsync_callback;
+        args.compositor = compositor;
         const engine_switches: []const [*:0]const u8 = if (cfg.force_impeller)
             &impeller_switches
         else

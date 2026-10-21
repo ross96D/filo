@@ -140,6 +140,15 @@ pub const Context = struct {
         return error.NoGraphicsQueueFamily;
     }
 
+    fn findMemoryType(self: *Context, type_bits: u32, properties: vk.MemoryPropertyFlags) !u32 {
+        const memory = self.vki.getPhysicalDeviceMemoryProperties(self.pdev);
+        for (memory.memory_types[0..memory.memory_type_count], 0..) |mem_type, i| {
+            if (type_bits & (@as(u32, 1) << @truncate(i)) != 0 and
+                mem_type.property_flags.contains(properties)) return @intCast(i);
+        }
+        return error.NoSuitableMemoryType;
+    }
+
     fn createDevice(self: *Context) !vk.Device {
         const priority = [_]f32{1.0};
         const qci = [_]vk.DeviceQueueCreateInfo{
@@ -270,10 +279,9 @@ fn monotonicNs() u64 {
 /// another when the window changes size.
 const Swapchain = struct {
     handle: vk.SwapchainKHR,
-    format: vk.Format,
     images: []vk.Image,
     /// Extent it was created with. The driver may clamp what we ask for, so this
-    /// is not necessarily the size the engine draws at.
+    /// is not necessarily the size the view is composited at.
     extent: vk.Extent2D,
     /// Armed by every acquire of an image from this swapchain and waited on
     /// straight after: it signals when the image is free to write to again,
@@ -287,12 +295,80 @@ const Swapchain = struct {
     }
 };
 
-/// What the engine needs to draw a frame: the image to render into, and the
-/// format it was created with.
-pub const Frame = struct {
+/// A device-local image the engine renders a view into. The engine caches these
+/// between frames, and asks us to create and destroy them through the
+/// compositor callbacks.
+pub const BackingStore = struct {
+    ctx: *Context,
     image: vk.Image,
+    memory: vk.DeviceMemory,
+    extent: vk.Extent2D,
     format: vk.Format,
+
+    pub fn create(ctx: *Context, extent: vk.Extent2D, format: vk.Format) !BackingStore {
+        if (extent.width == 0 or extent.height == 0) return error.EmptyBackingStore;
+
+        const image = try ctx.vkd.createImage(ctx.device, &.{
+            .image_type = .@"2d",
+            .format = format,
+            .extent = .{ .width = extent.width, .height = extent.height, .depth = 1 },
+            .mip_levels = 1,
+            .array_layers = 1,
+            .samples = .{ .@"1" = true },
+            .tiling = .optimal,
+            // The engine wraps this as a Skia render target (color attachment)
+            // and we read it back with a blit, so it needs both usages.
+            .usage = .{
+                .color_attachment = true,
+                .transfer_src = true,
+                .transfer_dst = true,
+                .sampled = true,
+            },
+            .sharing_mode = .exclusive,
+            .initial_layout = .undefined,
+        }, null);
+        errdefer ctx.vkd.destroyImage(ctx.device, image, null);
+
+        const requirements = ctx.vkd.getImageMemoryRequirements(ctx.device, image);
+        const memory_type = try ctx.findMemoryType(requirements.memory_type_bits, .{ .device_local = true });
+        const memory = try ctx.vkd.allocateMemory(ctx.device, &.{
+            .allocation_size = requirements.size,
+            .memory_type_index = memory_type,
+        }, null);
+        errdefer ctx.vkd.freeMemory(ctx.device, memory, null);
+
+        try ctx.vkd.bindImageMemory(ctx.device, image, memory, 0);
+
+        return .{
+            .ctx = ctx,
+            .image = image,
+            .memory = memory,
+            .extent = extent,
+            .format = format,
+        };
+    }
+
+    pub fn destroy(self: *BackingStore) void {
+        self.ctx.vkd.destroyImage(self.ctx.device, self.image, null);
+        self.ctx.vkd.freeMemory(self.ctx.device, self.memory, null);
+    }
 };
+
+/// A backing-store image handed back by the engine to composite onto a view.
+pub const Layer = struct {
+    image: vk.Image,
+    extent: vk.Extent2D,
+};
+
+fn colorSubresourceRange() vk.ImageSubresourceRange {
+    return .{
+        .aspect_mask = .{ .color = true },
+        .base_mip_level = 0,
+        .level_count = 1,
+        .base_array_layer = 0,
+        .layer_count = 1,
+    };
+}
 
 pub const Surface = struct {
     ctx: *Context,
@@ -310,6 +386,14 @@ pub const Surface = struct {
     stale: bool = false,
     /// Per-frame timing of the synchronization above, off unless asked for.
     trace: Trace,
+    /// Commands that composite backing-store images onto the swapchain. The
+    /// fence is armed by every submission and waited on before the buffer is
+    /// reused, so a frame can be recorded while the previous one is still on
+    /// the GPU.
+    cmd_pool: vk.CommandPool,
+    cmd: vk.CommandBuffer,
+    cmd_fence: vk.Fence,
+    cmd_fence_armed: bool = false,
 
     pub fn create(ctx: *Context, wl_display: *anyopaque, wl_surface: *anyopaque, width: u32, height: u32) !Surface {
         const surface = try ctx.vki.createWaylandSurfaceKHR(ctx.instance, &.{
@@ -319,12 +403,34 @@ pub const Surface = struct {
         errdefer ctx.vki.destroySurfaceKHR(ctx.instance, surface, null);
 
         const size = vk.Extent2D{ .width = width, .height = height };
+        const swapchain = try buildSwapchain(ctx, surface, size);
+        errdefer swapchain.destroy(ctx);
+
+        const cmd_pool = try ctx.vkd.createCommandPool(ctx.device, &.{
+            .flags = .{ .reset_command_buffer = true },
+            .queue_family_index = ctx.queue_family,
+        }, null);
+        errdefer ctx.vkd.destroyCommandPool(ctx.device, cmd_pool, null);
+
+        var cmd: vk.CommandBuffer = undefined;
+        try ctx.vkd.allocateCommandBuffers(ctx.device, &.{
+            .command_pool = cmd_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&cmd));
+
+        const cmd_fence = try ctx.vkd.createFence(ctx.device, &.{}, null);
+        errdefer ctx.vkd.destroyFence(ctx.device, cmd_fence, null);
+
         return .{
             .ctx = ctx,
             .surface = surface,
-            .swapchain = try buildSwapchain(ctx, surface, size),
+            .swapchain = swapchain,
             .frame_size = size,
             .trace = Trace.init(ctx.options.trace),
+            .cmd_pool = cmd_pool,
+            .cmd = cmd,
+            .cmd_fence = cmd_fence,
         };
     }
 
@@ -416,7 +522,6 @@ pub const Surface = struct {
 
         return .{
             .handle = swapchain,
-            .format = format,
             .images = images,
             .extent = extent,
             .fence = fence,
@@ -427,18 +532,21 @@ pub const Surface = struct {
         // The one place a device-wide wait is the right tool: once, at teardown,
         // with the engine already shut down.
         self.ctx.vkd.deviceWaitIdle(self.ctx.device) catch {};
+        self.ctx.vkd.destroyFence(self.ctx.device, self.cmd_fence, null);
+        self.ctx.vkd.destroyCommandPool(self.ctx.device, self.cmd_pool, null);
         if (self.swapchain) |swapchain| swapchain.destroy(self.ctx);
         self.ctx.vki.destroySurfaceKHR(self.ctx.instance, self.surface, null);
     }
 
-    /// Acquire an image for a frame the engine is drawing at `width`×`height`
-    /// (its `FlutterFrameInfo`). The swapchain is rebuilt first when that size
-    /// changed, or when a previous frame found it stale.
+    /// Acquire an image to composite a `width`×`height` view onto. The
+    /// swapchain is rebuilt first when that size changed, or when a previous
+    /// frame found it stale.
     ///
-    /// This and `present` run on the engine's render thread, one frame at a
-    /// time, so none of this state needs to be locked against the event loop:
-    /// the loop only sends window metrics, it never touches the swapchain.
-    pub fn acquire(self: *Surface, width: u32, height: u32) !Frame {
+    /// This, `presentLayers` and `present` run on the engine's render thread,
+    /// one frame at a time, so none of this state needs to be locked against
+    /// the event loop: the loop only sends window metrics, it never touches the
+    /// swapchain.
+    pub fn acquire(self: *Surface, width: u32, height: u32) !vk.Image {
         const size = vk.Extent2D{ .width = width, .height = height };
         const frame_start = self.trace.now();
 
@@ -482,7 +590,7 @@ pub const Surface = struct {
             // Usable for this frame, but not for the next one.
             if (acquired.result == .suboptimal_khr) self.stale = true;
             self.trace.record(acquire_ns, wait_ns, frame_start);
-            return .{ .image = swapchain.images[acquired.image_index], .format = swapchain.format };
+            return swapchain.images[acquired.image_index];
         }
     }
 
@@ -510,6 +618,157 @@ pub const Surface = struct {
         self.trace.recordPresent(self.trace.since(present_start));
 
         if (presented == .suboptimal_khr) self.stale = true;
+    }
+
+    /// Prepare the command buffer for a new frame. The previous submission is
+    /// waited on first, because its commands still own the buffer.
+    fn beginCommands(self: *Surface) !vk.CommandBuffer {
+        if (self.cmd_fence_armed) {
+            _ = try self.ctx.vkd.waitForFences(self.ctx.device, &.{self.cmd_fence}, .true, std.math.maxInt(u64));
+            try self.ctx.vkd.resetFences(self.ctx.device, &.{self.cmd_fence});
+            self.cmd_fence_armed = false;
+        }
+        try self.ctx.vkd.resetCommandBuffer(self.cmd, .{});
+        try self.ctx.vkd.beginCommandBuffer(self.cmd, &.{
+            .flags = .{ .one_time_submit = true },
+        });
+        return self.cmd;
+    }
+
+    fn imageBarrier(
+        self: *Surface,
+        cmd: vk.CommandBuffer,
+        image: vk.Image,
+        old_layout: vk.ImageLayout,
+        new_layout: vk.ImageLayout,
+        src_stage: vk.PipelineStageFlags,
+        dst_stage: vk.PipelineStageFlags,
+        src_access: vk.AccessFlags,
+        dst_access: vk.AccessFlags,
+    ) void {
+        self.ctx.vkd.cmdPipelineBarrier(cmd, src_stage, dst_stage, .{}, null, null, &.{.{
+            .src_access_mask = src_access,
+            .dst_access_mask = dst_access,
+            .old_layout = old_layout,
+            .new_layout = new_layout,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresource_range = colorSubresourceRange(),
+        }});
+    }
+
+    /// Composite the engine's backing-store images onto the swapchain and
+    /// present them. The engine host-syncs its own rendering before calling
+    /// this, so the only synchronization this needs is the layout transitions
+    /// from the engine's color-attachment writes to our transfer reads.
+    pub fn presentLayers(self: *Surface, width: u32, height: u32, layers: []const Layer) !void {
+        const image = try self.acquire(width, height);
+        const swapchain = self.swapchain orelse return error.NoSwapchain;
+
+        const cmd = try self.beginCommands();
+        errdefer self.ctx.vkd.resetCommandBuffer(cmd, .{}) catch {};
+
+        // The acquired image has undefined contents, and the backing stores may
+        // not cover all of it, so clear it before compositing.
+        self.imageBarrier(
+            cmd,
+            image,
+            .undefined,
+            .transfer_dst_optimal,
+            .{ .top_of_pipe = true },
+            .{ .transfer = true },
+            .{},
+            .{ .transfer_write = true },
+        );
+        const clear = vk.ClearColorValue{ .float_32 = .{ 0.0, 0.0, 0.0, 1.0 } };
+        self.ctx.vkd.cmdClearColorImage(cmd, image, .transfer_dst_optimal, &clear, &.{colorSubresourceRange()});
+
+        for (layers) |layer| {
+            if (layer.extent.width == 0 or layer.extent.height == 0) continue;
+
+            self.imageBarrier(
+                cmd,
+                layer.image,
+                .color_attachment_optimal,
+                .transfer_src_optimal,
+                .{ .color_attachment_output = true },
+                .{ .transfer = true },
+                .{ .color_attachment_write = true },
+                .{ .transfer_read = true },
+            );
+
+            // The engine has already applied the layer's offset and transform
+            // while rendering, so the backing-store image is drawn at the
+            // origin. It is normally exactly the size of the view.
+            const dst_width = @min(layer.extent.width, swapchain.extent.width);
+            const dst_height = @min(layer.extent.height, swapchain.extent.height);
+            const blit = vk.ImageBlit{
+                .src_subresource = .{
+                    .aspect_mask = .{ .color = true },
+                    .mip_level = 0,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+                .src_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = @intCast(layer.extent.width), .y = @intCast(layer.extent.height), .z = 1 },
+                },
+                .dst_subresource = .{
+                    .aspect_mask = .{ .color = true },
+                    .mip_level = 0,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+                .dst_offsets = .{
+                    .{ .x = 0, .y = 0, .z = 0 },
+                    .{ .x = @intCast(dst_width), .y = @intCast(dst_height), .z = 1 },
+                },
+            };
+            self.ctx.vkd.cmdBlitImage(
+                cmd,
+                layer.image,
+                .transfer_src_optimal,
+                image,
+                .transfer_dst_optimal,
+                &.{blit},
+                .linear,
+            );
+
+            // Leave the image ready for the engine to render into next frame.
+            self.imageBarrier(
+                cmd,
+                layer.image,
+                .transfer_src_optimal,
+                .color_attachment_optimal,
+                .{ .transfer = true },
+                .{ .color_attachment_output = true },
+                .{ .transfer_read = true },
+                .{ .color_attachment_read = true, .color_attachment_write = true },
+            );
+        }
+
+        self.imageBarrier(
+            cmd,
+            image,
+            .transfer_dst_optimal,
+            .present_src_khr,
+            .{ .transfer = true },
+            .{ .bottom_of_pipe = true },
+            .{ .transfer_write = true },
+            .{},
+        );
+
+        try self.ctx.vkd.endCommandBuffer(cmd);
+
+        const commands = [_]vk.CommandBuffer{cmd};
+        try self.ctx.vkd.queueSubmit(self.ctx.queue, &.{.{
+            .command_buffer_count = 1,
+            .p_command_buffers = &commands,
+        }}, self.cmd_fence);
+        self.cmd_fence_armed = true;
+
+        try self.present(image);
     }
 
     fn chooseSurfaceFormat(ctx: *Context, surface: vk.SurfaceKHR) !vk.Format {

@@ -32,6 +32,9 @@ const App = struct {
     /// atomic when it is torn down.
     engine: std.atomic.Value(?*engine.Engine) = std.atomic.Value(?*engine.Engine).init(null),
     channels: platform_channel.Registry,
+    /// Filled in before the engine is initialized. Its `user_data` is the
+    /// `VulkanView`, which the backing-store and present callbacks reach into.
+    compositor: c.FlutterCompositor = undefined,
 
     display_probe: ev.PipePoll = .init(-1, .read),
     platform_probe: ev.PipePoll = .init(-1, .read),
@@ -55,33 +58,69 @@ const VulkanView = struct {
         return @ptrCast(@constCast(p));
     }
 
-    fn getNextImage(
+    /// `FlutterVulkanRendererConfig` requires these callbacks to be non-null,
+    /// but the compositor path never calls them: the engine renders into
+    /// backing stores and `presentView` composites those.
+    fn unusedNextImage(
         user_data: ?*anyopaque,
         frame_info: [*c]const c.FlutterFrameInfo,
     ) callconv(.c) c.FlutterVulkanImage {
-        const self = &(@as(*App, @ptrCast(@alignCast(user_data))).view);
-        // The engine tells us the size it drew at, which is the size the
-        // swapchain has to be. A zero image tells the engine the frame was lost.
-        const size = frame_info.*.size;
-        const frame = self.surface.acquire(size.width, size.height) catch |e| {
-            std.debug.print("fembed: vulkan frame unavailable: {}\n", .{e});
-            return std.mem.zeroes(c.FlutterVulkanImage);
-        };
-        return .{
-            .struct_size = @sizeOf(c.FlutterVulkanImage),
-            .image = @backingInt(frame.image),
-            .format = @intCast(@backingInt(frame.format)),
-        };
+        _ = user_data;
+        _ = frame_info;
+        @panic("calling next image from renderer but should call the flutter compositor callbacks");
     }
 
-    fn presentImage(
+    fn unusedPresentImage(
         user_data: ?*anyopaque,
         image: [*c]const c.FlutterVulkanImage,
     ) callconv(.c) bool {
-        const self = &(@as(*App, @ptrCast(@alignCast(user_data))).view);
-        const vk_image: vk.Image = @fromBackingInt(@intCast(image.*.image));
-        self.surface.present(vk_image) catch |e| {
-            std.debug.print("fembed: vulkan present failed: {}\n", .{e});
+        _ = user_data;
+        _ = image;
+        @panic("calling present image from renderer but should call the flutter compositor callbacks");
+    }
+
+    /// The engine has finished rendering a view into backing-store images. Blit
+    /// them onto the view's swapchain and present it.
+    fn presentView(self: *VulkanView, info: [*c]const c.FlutterPresentViewInfo) bool {
+        if (info == null) return false;
+
+        // One layer per Flutter view, plus platform views if the app uses them.
+        // The engine does not put a hard limit on the count, but a frame with
+        // more layers than this is not something this embedder can composite.
+        var layers: [16]vulkan.Layer = undefined;
+        var count: usize = 0;
+        var width: u32 = 0;
+        var height: u32 = 0;
+
+        for (info.*.layers[0..info.*.layers_count]) |layer_ptr| {
+            const layer = layer_ptr.*;
+            if (layer.type != @as(c.FlutterLayerContentType, @intCast(c.kFlutterLayerContentTypeBackingStore))) continue;
+            const backing_store = layer.unnamed_0.backing_store;
+            if (backing_store == null or backing_store.*.user_data == null) continue;
+
+            const holder: *VulkanBackingStore = @ptrCast(@alignCast(backing_store.*.user_data.?));
+            width = @max(width, holder.store.extent.width);
+            height = @max(height, holder.store.extent.height);
+            if (count < layers.len) {
+                layers[count] = .{
+                    .image = holder.store.image,
+                    .extent = holder.store.extent,
+                };
+                count += 1;
+            }
+        }
+
+        // A frame with no backing-store layer still has to show something. Use
+        // the last size the engine drew at; before any frame there is nothing
+        // to present at all.
+        if (width == 0 or height == 0) {
+            width = self.surface.frame_size.width;
+            height = self.surface.frame_size.height;
+        }
+        if (width == 0 or height == 0) return true;
+
+        self.surface.presentLayers(width, height, layers[0..count]) catch |e| {
+            std.debug.print("fembed: compositor present failed: {}\n", .{e});
             return false;
         };
         return true;
@@ -103,12 +142,94 @@ const VulkanView = struct {
             .enabled_device_extension_count = vulkan.device_extensions.len,
             .enabled_device_extensions = @ptrCast(@constCast(&vulkan.device_extensions)),
             .get_instance_proc_address_callback = getInstanceProcAddr,
-            .get_next_image_callback = getNextImage,
-            .present_image_callback = presentImage,
+            .get_next_image_callback = unusedNextImage,
+            .present_image_callback = unusedPresentImage,
         };
         return config;
     }
 };
+
+/// The embedder's side of a `FlutterBackingStore`: the Vulkan image the engine
+/// renders into, and the description it is handed through to the engine. The
+/// pointer must remain stable while the engine caches the store.
+const VulkanBackingStore = struct {
+    store: vulkan.BackingStore,
+    image: c.FlutterVulkanImage,
+};
+
+/// The engine needs a render target for a view. Allocate one that Skia can wrap
+/// as a color attachment; the engine will render into it and hand it back in
+/// `presentViewCallback`.
+fn createBackingStore(
+    config: [*c]const c.FlutterBackingStoreConfig,
+    backing_store_out: [*c]c.FlutterBackingStore,
+    user_data: ?*anyopaque,
+) callconv(.c) bool {
+    const self: *VulkanView = @ptrCast(@alignCast(user_data.?));
+
+    const size = config.*.size;
+    const extent = vk.Extent2D{
+        .width = @intFromFloat(@max(size.width, 1.0)),
+        .height = @intFromFloat(@max(size.height, 1.0)),
+    };
+
+    // BGRA is the format the Linux embedder uses elsewhere, and it is what the
+    // swapchain prefers; the compositor blits between them when they differ.
+    var store = vulkan.BackingStore.create(&self.ctx, extent, .b8g8r8a8_unorm) catch |e| {
+        std.debug.print("fembed: could not create backing store: {}\n", .{e});
+        return false;
+    };
+
+    const holder = std.heap.c_allocator.create(VulkanBackingStore) catch {
+        store.destroy();
+        return false;
+    };
+    holder.* = .{
+        .store = store,
+        .image = .{
+            .struct_size = @sizeOf(c.FlutterVulkanImage),
+            .image = @backingInt(store.image),
+            .format = @intCast(@backingInt(store.format)),
+        },
+    };
+
+    backing_store_out.* = .{
+        .struct_size = @sizeOf(c.FlutterBackingStore),
+        .user_data = holder,
+        .type = @intCast(c.kFlutterBackingStoreTypeVulkan),
+        .did_update = true,
+        .unnamed_0 = .{ .vulkan = .{
+            .struct_size = @sizeOf(c.FlutterVulkanBackingStore),
+            .image = &holder.image,
+            .user_data = holder,
+            .destruction_callback = destroyBackingStore,
+        } },
+    };
+    return true;
+}
+
+/// The engine releases the backing store. Skia calls the destruction callback
+/// this store was handed with; that is where the image is freed.
+fn collectBackingStore(
+    backing_store: [*c]const c.FlutterBackingStore,
+    user_data: ?*anyopaque,
+) callconv(.c) bool {
+    _ = backing_store;
+    _ = user_data;
+    return true;
+}
+
+fn destroyBackingStore(user_data: ?*anyopaque) callconv(.c) void {
+    const holder: *VulkanBackingStore = @ptrCast(@alignCast(user_data.?));
+    holder.store.destroy();
+    std.heap.c_allocator.destroy(holder);
+}
+
+fn presentViewCallback(info: [*c]const c.FlutterPresentViewInfo) callconv(.c) bool {
+    if (info == null or info.*.user_data == null) return false;
+    const self: *VulkanView = @ptrCast(@alignCast(info.*.user_data.?));
+    return self.presentView(info);
+}
 
 /// Invoked by the engine (on the engine thread) for every platform message the
 /// framework sends to the embedder. Every message must be answered; the actual
@@ -211,10 +332,24 @@ pub fn main(init: std.process.Init) !void {
 
     const renderer = app.view.rendererConfig();
 
+    // Impeller's Vulkan backend cannot render into compositor backing stores.
+    // FORCE_IMPELLER still turns it on, which is expected to fail: this embedder
+    // has no direct-to-swapchain path any more.
+    app.compositor = .{
+        .struct_size = @sizeOf(c.FlutterCompositor),
+        .user_data = &app.view,
+        .create_backing_store_callback = createBackingStore,
+        .collect_backing_store_callback = collectBackingStore,
+        .present_layers_callback = null,
+        .avoid_backing_store_cache = false,
+        .present_view_callback = presentViewCallback,
+    };
+
     const eng = try engine.Engine.init(
         allocator,
         cfg,
         &renderer,
+        &app.compositor,
         &app,
         &app.engine,
         platformMessageCallback,
