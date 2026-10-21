@@ -200,7 +200,7 @@ pub const Connection = struct {
         switch (event) {
             .enter => |e| {
                 if (self.clipboard) |clip| clip.updateSerial(e.serial);
-                inp.pointerEnter(e.surface_x.toDouble(), e.surface_y.toDouble());
+                inp.pointerEnter(e.surface, e.surface_x.toDouble(), e.surface_y.toDouble());
             },
             .leave => {
                 inp.pointerLeave();
@@ -240,6 +240,10 @@ pub const Connection = struct {
                 // `set_selection` is only accepted with a serial from a recent
                 // seat event, and gaining focus is one.
                 if (self.clipboard) |clip| clip.updateSerial(e.serial);
+                inp.keyboardEnter(e.surface);
+            },
+            .leave => {
+                inp.keyboardLeave();
             },
             .key => |k| {
                 if (self.clipboard) |clip| clip.updateSerial(k.serial);

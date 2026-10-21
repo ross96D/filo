@@ -5,6 +5,7 @@
 //! inside the module path.
 
 test {
+    _ = @import("engine.zig");
     _ = @import("wayland/clipboard.zig");
     _ = @import("wayland/connection.zig");
     _ = @import("wayland/frame_clock.zig");
@@ -15,6 +16,7 @@ test {
     _ = @import("flutter/table.zig");
     _ = @import("flutter/text_input.zig");
     _ = @import("flutter/types/text_input.zig");
+    _ = @import("flutter/window_manager.zig");
     _ = @import("vulkan.zig");
     _ = @import("wayland/window.zig");
 }

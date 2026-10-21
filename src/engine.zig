@@ -57,6 +57,82 @@ fn taskRunnerPostTask(task: c.FlutterTask, target_time_ns: u64, user_data: ?*any
 /// startup timestamps no worse than not having a vsync source at all.
 pub const default_frame_period_ns = 16_666_666;
 
+/// The identifier of one Flutter view. The implicit view is always 0; any
+/// additional views are added and removed through `Engine.addView` and
+/// `Engine.removeView`.
+pub const ViewId = c.FlutterViewId;
+
+/// Whether a view has platform (keyboard) focus.
+pub const ViewFocusState = enum(c.FlutterViewFocusState) {
+    unfocused = @intCast(c.kUnfocused),
+    focused = @intCast(c.kFocused),
+};
+
+/// The direction focus moved in, when it moved between views because of a
+/// traversal such as Tab or Shift+Tab.
+pub const ViewFocusDirection = enum(c.FlutterViewFocusDirection) {
+    none = @intCast(c.kUndefined),
+    forward = @intCast(c.kForward),
+    backward = @intCast(c.kBackward),
+};
+
+/// Called when an add-view operation finishes. `user_data` is the baton passed
+/// to `Engine.addView`.
+pub const AddViewCallback = *const fn (result: [*c]const c.FlutterAddViewResult) callconv(.c) void;
+
+/// Called when a remove-view operation finishes. `user_data` is the baton
+/// passed to `Engine.removeView`.
+pub const RemoveViewCallback = *const fn (result: [*c]const c.FlutterRemoveViewResult) callconv(.c) void;
+
+/// A callback queued for the thread that owns the Wayland connection and the
+/// Vulkan surfaces. Engine callbacks (view add/remove, platform messages) can
+/// run on engine-managed threads, so they hand work here instead of touching
+/// those resources directly.
+pub const MainTask = struct {
+    callback: *const fn (user_data: ?*anyopaque) void,
+    user_data: ?*anyopaque,
+};
+
+fn windowMetrics(
+    view_id: ViewId,
+    width: usize,
+    height: usize,
+    dpr: f64,
+) c.FlutterWindowMetricsEvent {
+    return .{
+        .struct_size = @sizeOf(c.FlutterWindowMetricsEvent),
+        .width = width,
+        .height = height,
+        .pixel_ratio = dpr,
+        .left = 0,
+        .top = 0,
+        .physical_view_inset_top = 0.0,
+        .physical_view_inset_right = 0.0,
+        .physical_view_inset_bottom = 0.0,
+        .physical_view_inset_left = 0.0,
+        .display_id = 0,
+        .view_id = view_id,
+        .has_constraints = false,
+        .min_width_constraint = 0,
+        .min_height_constraint = 0,
+        .max_width_constraint = 0,
+        .max_height_constraint = 0,
+    };
+}
+
+fn viewFocusEvent(
+    view_id: ViewId,
+    state: ViewFocusState,
+    direction: ViewFocusDirection,
+) c.FlutterViewFocusEvent {
+    return .{
+        .struct_size = @sizeOf(c.FlutterViewFocusEvent),
+        .view_id = view_id,
+        .state = @backingInt(state),
+        .direction = @backingInt(direction),
+    };
+}
+
 pub const Engine = struct {
     lib: std.DynLib,
     procs: c.FlutterEngineProcTable,
@@ -71,6 +147,10 @@ pub const Engine = struct {
     /// started the engine, so they queue here until the event loop answers them.
     vsync_mutex: std.atomic.Mutex = .unlocked,
     vsync_batons: std.ArrayListUnmanaged(isize) = .empty,
+    /// Work from engine callbacks that has to run on the Wayland/Vulkan thread.
+    /// Drained by `drainPlatformTasks`, alongside the engine's platform tasks.
+    main_mutex: std.atomic.Mutex = .unlocked,
+    main_tasks: std.ArrayListUnmanaged(MainTask) = .empty,
     /// How far apart display refreshes are. Set by the window once it knows,
     /// which is also what the timestamps handed back use.
     frame_period_ns: u64 = default_frame_period_ns,
@@ -94,6 +174,9 @@ pub const Engine = struct {
         self_slot: *std.atomic.Value(?*Engine),
         platform_message_callback: c.FlutterPlatformMessageCallback,
         vsync_callback: c.VsyncCallback,
+        /// Called when the framework wants the native view focus changed, for
+        /// example after a focus traversal or a programmatic focus request.
+        view_focus_change_request_callback: c.FlutterViewFocusChangeRequestCallback,
     ) !*Engine {
         const self = try allocator.create(Engine);
         errdefer allocator.destroy(self);
@@ -177,6 +260,7 @@ pub const Engine = struct {
         // Without this the engine paces itself with a hardcoded 60 Hz fallback,
         // no matter what the display can do.
         args.vsync_callback = vsync_callback;
+        args.view_focus_change_request_callback = view_focus_change_request_callback;
         args.compositor = compositor;
         const engine_switches: []const [*:0]const u8 = if (cfg.force_impeller)
             &impeller_switches
@@ -198,27 +282,86 @@ pub const Engine = struct {
         return self;
     }
 
+    /// Send metrics for the implicit view, which every engine has.
     pub fn sendWindowMetrics(self: *Engine, width: usize, height: usize, dpr: f64) void {
-        var metrics: c.FlutterWindowMetricsEvent = .{
-            .struct_size = @sizeOf(c.FlutterWindowMetricsEvent),
-            .width = width,
-            .height = height,
-            .pixel_ratio = dpr,
-            .left = 0,
-            .top = 0,
-            .physical_view_inset_top = 0.0,
-            .physical_view_inset_right = 0.0,
-            .physical_view_inset_bottom = 0.0,
-            .physical_view_inset_left = 0.0,
-            .display_id = 0,
-            .view_id = 0,
-            .has_constraints = false,
-            .min_width_constraint = 0,
-            .min_height_constraint = 0,
-            .max_width_constraint = 0,
-            .max_height_constraint = 0,
-        };
+        self.sendWindowMetricsForView(0, width, height, dpr);
+    }
+
+    pub fn sendWindowMetricsForView(
+        self: *Engine,
+        view_id: ViewId,
+        width: usize,
+        height: usize,
+        dpr: f64,
+    ) void {
+        var metrics = windowMetrics(view_id, width, height, dpr);
         _ = self.procs.SendWindowMetricsEvent.?(self.handle, &metrics);
+    }
+
+    /// Add a view with `view_id`, initially `width`×`height` at `dpr`.
+    ///
+    /// This is asynchronous. `callback` is invoked on an engine-managed thread;
+    /// it must either only touch thread-safe state or re-thread before touching
+    /// Wayland or Vulkan resources. The view must not be used until the callback
+    /// reports that it was added.
+    ///
+    /// The implicit view (0) always exists and cannot be added.
+    pub fn addView(
+        self: *Engine,
+        view_id: ViewId,
+        width: usize,
+        height: usize,
+        dpr: f64,
+        user_data: ?*anyopaque,
+        callback: AddViewCallback,
+    ) !void {
+        var metrics = windowMetrics(view_id, width, height, dpr);
+        const info: c.FlutterAddViewInfo = .{
+            .struct_size = @sizeOf(c.FlutterAddViewInfo),
+            .view_id = view_id,
+            .view_metrics = &metrics,
+            .user_data = user_data,
+            .add_view_callback = callback,
+        };
+        const result = self.procs.AddView.?(self.handle, &info);
+        if (result != 0) return error.AddViewFailed;
+    }
+
+    /// Remove a view. The callback is required and asynchronous: the view's
+    /// surface must stay alive until it reports that the view was removed.
+    ///
+    /// The implicit view (0) cannot be removed.
+    pub fn removeView(
+        self: *Engine,
+        view_id: ViewId,
+        user_data: ?*anyopaque,
+        callback: RemoveViewCallback,
+    ) !void {
+        if (view_id == 0) return error.CannotRemoveImplicitView;
+
+        const info: c.FlutterRemoveViewInfo = .{
+            .struct_size = @sizeOf(c.FlutterRemoveViewInfo),
+            .view_id = view_id,
+            .user_data = user_data,
+            .remove_view_callback = callback,
+        };
+        const result = self.procs.RemoveView.?(self.handle, &info);
+        if (result != 0) return error.RemoveViewFailed;
+    }
+
+    /// Tell the engine that a view gained or lost platform (keyboard) focus.
+    /// `direction` is only meaningful when focus moved between views.
+    pub fn sendViewFocusEvent(
+        self: *Engine,
+        view_id: ViewId,
+        state: ViewFocusState,
+        direction: ViewFocusDirection,
+    ) void {
+        var event = viewFocusEvent(view_id, state, direction);
+        const result = self.procs.SendViewFocusEvent.?(self.handle, &event);
+        if (result != 0) {
+            std.debug.print("fembed: SendViewFocusEvent failed: {}\n", .{result});
+        }
     }
 
     /// Ask the engine to draw a frame. A window metrics event already makes the
@@ -335,6 +478,35 @@ pub const Engine = struct {
         _ = self.procs.SendPlatformMessageResponse.?(self.handle, handle, message.ptr, message.len);
     }
 
+    /// Queue work that must run on the thread that owns the Wayland connection
+    /// and the Vulkan surfaces. Safe to call from any engine-managed thread.
+    pub fn postMainTask(self: *Engine, callback: *const fn (user_data: ?*anyopaque) void, user_data: ?*anyopaque) void {
+        while (!self.main_mutex.tryLock()) std.atomic.spinLoopHint();
+        self.main_tasks.append(std.heap.c_allocator, .{
+            .callback = callback,
+            .user_data = user_data,
+        }) catch {
+            self.main_mutex.unlock();
+            std.debug.print("fembed: could not queue main-thread task\n", .{});
+            return;
+        };
+        self.main_mutex.unlock();
+
+        // The same eventfd wakes the loop for both kinds of task.
+        var one: u64 = 1;
+        _ = std.os.linux.write(self.task_runner.eventfd, std.mem.asBytes(&one).ptr, @sizeOf(u64));
+    }
+
+    fn drainMainTasks(self: *Engine) void {
+        while (!self.main_mutex.tryLock()) std.atomic.spinLoopHint();
+        var tasks = self.main_tasks;
+        self.main_tasks = .empty;
+        self.main_mutex.unlock();
+        defer tasks.deinit(std.heap.c_allocator);
+
+        for (tasks.items) |task| task.callback(task.user_data);
+    }
+
     /// The fd the event loop watches in order to run platform tasks on the
     /// main thread.
     pub fn getPlatformEventFd(self: *Engine) std.posix.fd_t {
@@ -355,6 +527,8 @@ pub const Engine = struct {
             _ = self.procs.RunTask.?(self.handle, &task);
         }
         tasks.deinit(std.heap.c_allocator);
+
+        self.drainMainTasks();
     }
 
     pub fn deinit(self: *Engine, allocator: std.mem.Allocator) void {
@@ -375,6 +549,24 @@ pub const Engine = struct {
         _ = std.os.linux.close(self.task_runner.eventfd);
         self.task_runner.list.deinit(std.heap.c_allocator);
         self.vsync_batons.deinit(std.heap.c_allocator);
+        self.main_tasks.deinit(std.heap.c_allocator);
         allocator.destroy(self);
     }
 };
+
+test "window metrics are built for the requested view" {
+    const metrics = windowMetrics(42, 640, 480, 1.5);
+    try std.testing.expectEqual(@as(ViewId, 42), metrics.view_id);
+    try std.testing.expectEqual(@as(usize, 640), metrics.width);
+    try std.testing.expectEqual(@as(usize, 480), metrics.height);
+    try std.testing.expectEqual(@as(f64, 1.5), metrics.pixel_ratio);
+    try std.testing.expectEqual(@as(usize, @sizeOf(c.FlutterWindowMetricsEvent)), metrics.struct_size);
+}
+
+test "view focus events carry the view, state and direction" {
+    const event = viewFocusEvent(7, .focused, .backward);
+    try std.testing.expectEqual(@as(ViewId, 7), event.view_id);
+    try std.testing.expectEqual(@as(c.FlutterViewFocusState, @intCast(c.kFocused)), event.state);
+    try std.testing.expectEqual(@as(c.FlutterViewFocusDirection, @intCast(c.kBackward)), event.direction);
+    try std.testing.expectEqual(@as(usize, @sizeOf(c.FlutterViewFocusEvent)), event.struct_size);
+}

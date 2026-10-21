@@ -69,8 +69,11 @@ pub const platform_views_2 = Channel{ .name = "flutter/platform_views_2", .codec
 /// `SystemChannels.sensitiveContent`.
 pub const sensitive_content = Channel{ .name = "flutter/sensitivecontent", .codec = .standard_method };
 
+/// The embedder's own window lifecycle channel.
+pub const windows = Channel{ .name = "fembed/windows", .codec = .json_method };
+
 /// The handler that answers a channel's messages.
-pub const Handler = enum { text_input, platform };
+pub const Handler = enum { text_input, platform, windows };
 
 /// What to do with a message that arrives on a channel: which handler answers
 /// it, and the codec the framework decodes the reply with.
@@ -88,6 +91,7 @@ pub const Route = struct {
 pub const routes = [_]table.Entry(Route){
     .{ .name = text_input.name, .value = .{ .handler = .text_input, .codec = text_input.codec } },
     .{ .name = platform.name, .value = .{ .handler = .platform, .codec = platform.codec } },
+    .{ .name = windows.name, .value = .{ .handler = .windows, .codec = windows.codec } },
     .{ .name = navigation.name, .value = .{ .codec = navigation.codec } },
     .{ .name = skia.name, .value = .{ .codec = skia.codec } },
     .{ .name = undo_manager.name, .value = .{ .codec = undo_manager.codec } },
@@ -100,7 +104,7 @@ test "routes carry the handler and codec of each channel the framework sends" {
     var routes_table = table.Table(Route).init(testing.allocator, &routes);
     defer routes_table.deinit();
 
-    // The two channels we implement speak `JSONMethodCodec`.
+    // The channels we implement speak `JSONMethodCodec`.
     const text_input_route = routes_table.get(text_input.name).?;
     try testing.expectEqual(Handler.text_input, text_input_route.handler.?);
     try testing.expectEqual(Codec.json_method, text_input_route.codec);
@@ -108,6 +112,10 @@ test "routes carry the handler and codec of each channel the framework sends" {
     const platform_route = routes_table.get(platform.name).?;
     try testing.expectEqual(Handler.platform, platform_route.handler.?);
     try testing.expectEqual(Codec.json_method, platform_route.codec);
+
+    const windows_route = routes_table.get(windows.name).?;
+    try testing.expectEqual(Handler.windows, windows_route.handler.?);
+    try testing.expectEqual(Codec.json_method, windows_route.codec);
 
     // A JSON channel we do not implement still carries its codec, so that the
     // framework can decode the null reply we send it.

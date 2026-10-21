@@ -2,6 +2,8 @@ const std = @import("std");
 
 const c = @import("flutter");
 const xkb = @import("xkb");
+const wayland = @import("wayland");
+const wl = wayland.client.wl;
 const engine = @import("engine.zig");
 const keyboard = @import("flutter/keyboard.zig");
 const text_input = @import("flutter/text_input.zig");
@@ -36,6 +38,13 @@ pub const Input = struct {
     mouse_y: f64,
     buttons: i64,
     device: i32,
+    /// The view the pointer is currently over. Pointer events carry it, while
+    /// the engine routes keyboard events to whichever view it considers focused.
+    pointer_view: engine.ViewId,
+    /// The view that last received platform keyboard focus, if any.
+    focused_view: ?engine.ViewId,
+    resolve_ctx: ?*anyopaque = null,
+    resolve_fn: ?*const fn (?*anyopaque, *wl.Surface) ?engine.ViewId = null,
 
     pub fn init(eng: *engine.Engine, ti: *text_input.TextInput) !Input {
         const ctx = xkb.xkb_context_new(CONTEXT_NO_FLAGS) orelse return error.XkbContextFailed;
@@ -49,13 +58,57 @@ pub const Input = struct {
             .mouse_y = 0,
             .buttons = 0,
             .device = 0,
+            .pointer_view = 0,
+            .focused_view = null,
         };
+    }
+
+    /// Give the input handler the window registry's surface → view lookup. The
+    /// connection owns the seat listeners; this is how it finds the view a
+    /// surface belongs to.
+    pub fn setViewResolver(
+        self: *Input,
+        ctx: ?*anyopaque,
+        resolve: *const fn (?*anyopaque, *wl.Surface) ?engine.ViewId,
+    ) void {
+        self.resolve_ctx = ctx;
+        self.resolve_fn = resolve;
+    }
+
+    fn viewForSurface(self: *Input, surface: ?*wl.Surface) ?engine.ViewId {
+        const s = surface orelse return null;
+        const resolve = self.resolve_fn orelse return null;
+        return resolve(self.resolve_ctx, s);
     }
 
     pub fn deinit(self: *Input) void {
         if (self.state) |s| xkb.xkb_state_unref(s);
         if (self.keymap) |k| xkb.xkb_keymap_unref(k);
         if (self.xkb_ctx) |ctx| xkb.xkb_context_unref(ctx);
+    }
+
+    /// The seat's keyboard entered `surface`: that window's view now has
+    /// platform focus. Sent once per transition; the compositor can repeat an
+    /// enter without an intervening leave.
+    pub fn keyboardEnter(self: *Input, surface: ?*wl.Surface) void {
+        const view_id = self.viewForSurface(surface) orelse return;
+
+        if (self.focused_view) |previous| {
+            if (previous == view_id) return;
+            self.eng.sendViewFocusEvent(previous, .unfocused, .none);
+        }
+        self.focused_view = view_id;
+        std.debug.print("fembed: view {} gained focus\n", .{view_id});
+        self.eng.sendViewFocusEvent(view_id, .focused, .none);
+    }
+
+    /// The seat's keyboard left the surface: the view no longer has platform
+    /// focus.
+    pub fn keyboardLeave(self: *Input) void {
+        const view_id = self.focused_view orelse return;
+        self.focused_view = null;
+        std.debug.print("fembed: view {} lost focus\n", .{view_id});
+        self.eng.sendViewFocusEvent(view_id, .unfocused, .none);
     }
 
     /// Install a new keymap from the raw XKB text provided by wl_keyboard.keymap.
@@ -115,7 +168,8 @@ pub const Input = struct {
         });
     }
 
-    pub fn pointerEnter(self: *Input, x: f64, y: f64) void {
+    pub fn pointerEnter(self: *Input, surface: ?*wl.Surface, x: f64, y: f64) void {
+        if (self.viewForSurface(surface)) |view_id| self.pointer_view = view_id;
         self.mouse_x = x;
         self.mouse_y = y;
         self.sendPointer(c.kAdd, 0, 0, 0, c.kFlutterPointerSignalKindNone);
@@ -176,7 +230,7 @@ pub const Input = struct {
             .pan_y = 0,
             .scale = 0,
             .rotation = 0,
-            .view_id = 0,
+            .view_id = self.pointer_view,
             .pressure = 0,
             .pressure_min = 0,
             .pressure_max = 0,

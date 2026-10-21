@@ -26,6 +26,7 @@ pub const Options = struct {
 
 pub const Context = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     options: Options,
     lib: std.DynLib,
     vkb: vk.BaseWrapper,
@@ -36,8 +37,13 @@ pub const Context = struct {
     vkd: vk.DeviceWrapper,
     queue: vk.Queue,
     queue_family: u32,
+    /// Serializes queue submissions/presents against surface teardown. Views
+    /// present on the engine's raster thread, while removing a view releases
+    /// its surface from the Wayland thread; `vkDeviceWaitIdle` must not run
+    /// while another thread is using the queue.
+    render_mutex: std.Io.Mutex = .init,
 
-    pub fn init(allocator: std.mem.Allocator, options: Options) !Context {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !Context {
         var lib = try std.DynLib.open("libvulkan.so.1");
         errdefer lib.close();
 
@@ -46,8 +52,10 @@ pub const Context = struct {
 
         var self: Context = undefined;
         self.allocator = allocator;
+        self.io = io;
         self.options = options;
         self.lib = lib;
+        self.render_mutex = .init;
         self.vkb = vk.BaseWrapper.load(get_instance_proc_addr);
 
         const layers = try self.enabledLayers();
@@ -484,8 +492,17 @@ pub const Surface = struct {
         const caps = try ctx.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.pdev, surface);
         const extent = swapchainExtent(size, caps);
         const format = try chooseSurfaceFormat(ctx, surface);
+        const present_mode = try choosePresentMode(ctx, surface);
 
-        var image_count = caps.min_image_count + 1;
+        // Mailbox keeps `vkQueuePresentKHR` from blocking when an occluded
+        // surface's buffers are not being released quickly. With several
+        // windows, a FIFO stall on one surface otherwise blocks the single
+        // raster thread (and therefore every view). Mailbox wants at least
+        // three images so it always has one to replace and one to display.
+        var image_count = if (present_mode == .mailbox_khr)
+            @max(caps.min_image_count + 1, 3)
+        else
+            caps.min_image_count + 1;
         if (caps.max_image_count != 0 and image_count > caps.max_image_count) image_count = caps.max_image_count;
 
         const swapchain = try ctx.vkd.createSwapchainKHR(ctx.device, &.{
@@ -504,7 +521,7 @@ pub const Surface = struct {
             .image_sharing_mode = .exclusive,
             .pre_transform = caps.current_transform,
             .composite_alpha = .{ .opaque_khr = true },
-            .present_mode = .fifo_khr,
+            .present_mode = present_mode,
             .clipped = .true,
         }, null);
         errdefer ctx.vkd.destroySwapchainKHR(ctx.device, swapchain, null);
@@ -529,6 +546,12 @@ pub const Surface = struct {
     }
 
     pub fn destroy(self: *Surface) void {
+        // Serialize with the raster thread: another view may still be
+        // presenting when a view is removed. The engine has released this
+        // surface, but the queue is shared.
+        self.ctx.render_mutex.lockUncancelable(self.ctx.io);
+        defer self.ctx.render_mutex.unlock(self.ctx.io);
+
         // The one place a device-wide wait is the right tool: once, at teardown,
         // with the engine already shut down.
         self.ctx.vkd.deviceWaitIdle(self.ctx.device) catch {};
@@ -663,6 +686,12 @@ pub const Surface = struct {
     /// this, so the only synchronization this needs is the layout transitions
     /// from the engine's color-attachment writes to our transfer reads.
     pub fn presentLayers(self: *Surface, width: u32, height: u32, layers: []const Layer) !void {
+        // One queue is shared by every view, and surface teardown on the main
+        // thread waits on that queue. Keep the whole acquire/composite/present
+        // sequence atomic with respect to it.
+        self.ctx.render_mutex.lockUncancelable(self.ctx.io);
+        defer self.ctx.render_mutex.unlock(self.ctx.io);
+
         const image = try self.acquire(width, height);
         const swapchain = self.swapchain orelse return error.NoSwapchain;
 
@@ -769,6 +798,20 @@ pub const Surface = struct {
         self.cmd_fence_armed = true;
 
         try self.present(image);
+    }
+
+    /// Pick mailbox when the surface supports it. It decouples presentation
+    /// from the compositor's buffer release, which matters once there is more
+    /// than one window: a FIFO present that blocks holds up the raster thread
+    /// and therefore every view.
+    fn choosePresentMode(ctx: *Context, surface: vk.SurfaceKHR) !vk.PresentModeKHR {
+        const modes = try ctx.vki.getPhysicalDeviceSurfacePresentModesAllocKHR(ctx.pdev, surface, ctx.allocator);
+        defer ctx.allocator.free(modes);
+
+        for (modes) |mode| {
+            if (mode == .mailbox_khr) return .mailbox_khr;
+        }
+        return .fifo_khr;
     }
 
     fn chooseSurfaceFormat(ctx: *Context, surface: vk.SurfaceKHR) !vk.Format {

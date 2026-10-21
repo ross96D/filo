@@ -66,12 +66,12 @@ pub const Window = struct {
     /// itself is not touched here: it follows the size the engine says it draws
     /// at (see `vulkan.Surface.acquire`), which is what the metrics below tell
     /// it, so there is nothing to hand over between threads.
-    pub fn applyResize(self: *Window, eng: *engine.Engine) void {
+    pub fn applyResize(self: *Window, eng: *engine.Engine, view_id: engine.ViewId) void {
         if (!self.resized) return;
         self.resized = false;
 
-        std.debug.print("fembed: window resized to {}x{}\n", .{ self.width, self.height });
-        eng.sendWindowMetrics(self.width, self.height, self.pixel_ratio);
+        std.debug.print("fembed: view {} resized to {}x{}\n", .{ view_id, self.width, self.height });
+        eng.sendWindowMetricsForView(view_id, self.width, self.height, self.pixel_ratio);
         // A window metrics event makes the framework relayout and schedule a
         // frame on its own; asking for one anyway means a resize can never be
         // left unpainted.

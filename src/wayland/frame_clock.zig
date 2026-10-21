@@ -43,6 +43,14 @@ pub const FrameClock = struct {
     }
 
     pub fn deinit(self: *FrameClock) void {
+        // The loop may still hold the timer completion, and the surface may
+        // still have a frame callback armed. Drop both before the clock (and
+        // eventually the surface) goes away.
+        self.clearTimer();
+        if (self.callback) |callback| {
+            callback.destroy();
+            self.callback = null;
+        }
         self.ctx.allocator.destroy(self);
     }
 
