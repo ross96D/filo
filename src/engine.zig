@@ -241,7 +241,7 @@ pub const Engine = struct {
             .platform_task_runner = &self.task_runner_description,
             .render_task_runner = null,
             .thread_priority_setter = null,
-            .ui_task_runner = null,
+            .ui_task_runner = &self.task_runner_description,
         };
 
         const assets_z = try allocator.dupeSentinel(u8, cfg.assets, 0);
