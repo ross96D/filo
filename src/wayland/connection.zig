@@ -151,7 +151,6 @@ pub const Connection = struct {
         errdefer xdg_surface.destroy();
         const toplevel = try xdg_surface.getToplevel();
         errdefer toplevel.destroy();
-        toplevel.setTitle("fembed");
 
         return window.Window.create(self.allocator, surface, xdg_surface, toplevel);
     }
@@ -318,7 +317,11 @@ pub const Connection = struct {
                 if (std.mem.orderZ(u8, global.interface, wl.Compositor.interface.name) == .eq) {
                     globals.compositor = registry.bind(global.name, wl.Compositor, 1) catch return;
                 } else if (std.mem.orderZ(u8, global.interface, xdg.WmBase.interface.name) == .eq) {
-                    globals.wm_base = registry.bind(global.name, xdg.WmBase, 1) catch return;
+                    // Bind as high as the compositor advertises (capped by the
+                    // generated protocol) so xdg_toplevel.configure_bounds (v4)
+                    // and wm_capabilities (v5) are delivered.
+                    const version = @min(global.version, xdg.WmBase.generated_version);
+                    globals.wm_base = registry.bind(global.name, xdg.WmBase, version) catch return;
                 } else if (std.mem.orderZ(u8, global.interface, wl.DataDeviceManager.interface.name) == .eq) {
                     globals.data_device_manager = registry.bind(global.name, wl.DataDeviceManager, @min(global.version, 3)) catch return;
                 } else if (std.mem.orderZ(u8, global.interface, wl.Seat.interface.name) == .eq) {

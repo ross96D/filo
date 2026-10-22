@@ -61,6 +61,25 @@ const View = struct {
     fn viewTitleZ(self: *View) [*:0]const u8 {
         return @ptrCast(&self.title);
     }
+
+    /// Drain the events the Wayland listeners recorded and hand them to the
+    /// registered callbacks. Runs on the main (UI) thread.
+    fn emitWindowEvents(self: *View, eng: *engine.Engine) void {
+        if (self.win.resized) {
+            self.win.applyResize(eng, self.id);
+            if (self.callbacks.on_configure) |on_configure| {
+                on_configure(@intCast(self.win.width), @intCast(self.win.height));
+            }
+        }
+        if (self.win.state_dirty) {
+            self.win.state_dirty = false;
+            if (self.callbacks.on_state) |on_state| on_state(self.win.state_bits);
+        }
+        if (self.win.capabilities_dirty) {
+            self.win.capabilities_dirty = false;
+            if (self.callbacks.on_capabilities) |on_capabilities| on_capabilities(self.win.wm_capabilities);
+        }
+    }
 };
 
 /// The one struct the callbacks reach into: it is the engine's `user_data`
@@ -297,6 +316,19 @@ const App = struct {
             .create = bridgeCreate,
             .destroy = bridgeDestroy,
             .observe = bridgeObserve,
+            .set_title = bridgeSetTitle,
+            .set_size = bridgeSetSize,
+            .set_constraints = bridgeSetConstraints,
+            .activate = bridgeActivate,
+            .set_maximized = bridgeSetMaximized,
+            .set_minimized = bridgeSetMinimized,
+            .set_fullscreen = bridgeSetFullscreen,
+            .set_parent = bridgeSetParent,
+            .get_size = bridgeGetSize,
+            .get_state = bridgeGetState,
+            .get_capabilities = bridgeGetCapabilities,
+            .get_title = bridgeGetTitle,
+            .get_offset = bridgeGetOffset,
         } };
     }
 
@@ -309,19 +341,47 @@ const App = struct {
         if (!app.ctx_ready) return .backend_failed;
 
         const kind = std.enums.fromInt(windowing.Kind, req.kind) orelse return .invalid_argument;
-        // Stage 1 only implements regular toplevel windows.
-        if (kind != .regular) return .unsupported;
+        // Stage 1 only implements toplevel windows.
+        if (kind != .toplevel) return .unsupported;
 
-        const width: u32 = if (req.width > 0) @intCast(@min(req.width, 16_384)) else 800;
-        const height: u32 = if (req.height > 0) @intCast(@min(req.height, 16_384)) else 600;
+        const width: u32 = if (req.size.width > 0) @intCast(@min(req.size.width, 16_384)) else 800;
+        const height: u32 = if (req.size.height > 0) @intCast(@min(req.size.height, 16_384)) else 600;
 
         const view = app.createView(width, height) catch |err| {
             std.debug.print("fembed: windowing create: could not create window: {}\n", .{err});
             return .backend_failed;
         };
 
-        if (req.title) |title| view.win.toplevel.setTitle(title);
+        if (req.parent_view_id >= 0) {
+            const parent = app.viewForId(req.parent_view_id) orelse {
+                app.destroyView(view);
+                return .unknown_view;
+            };
+            view.win.setParent(parent.win);
+        }
+
+        if (req.title) |title| view.win.setTitle(title);
         view.setViewTitleZ(req.title);
+
+        if (req.resizable == 0) {
+            const fixed = if (req.size.width > 0 and req.size.height > 0)
+                windowing.Size{ .width = req.size.width, .height = req.size.height }
+            else
+                windowing.Size{ .width = @intCast(view.win.width), .height = @intCast(view.win.height) };
+            view.win.setMinSize(fixed);
+            view.win.setMaxSize(fixed);
+        } else {
+            view.win.setMinSize(req.min_size);
+            view.win.setMaxSize(req.max_size);
+        }
+        // The xdg_toplevel requests above are double-buffered.
+        view.win.commit();
+
+        // The initial state is returned in the handle; do not replay it as
+        // events once the caller registers its callbacks.
+        view.win.resized = false;
+        view.win.state_dirty = false;
+        view.win.capabilities_dirty = false;
 
         beginAddViewSync(app, view) catch |err| {
             std.debug.print("fembed: windowing create: AddView failed: {}\n", .{err});
@@ -334,12 +394,14 @@ const App = struct {
         };
 
         out.view_id = view.id;
-        out.content_width = @intCast(view.win.width);
-        out.content_height = @intCast(view.win.height);
+        out.content_size = .{
+            .width = @intCast(view.win.width),
+            .height = @intCast(view.win.height),
+        };
         out.title = view.viewTitleZ();
-        out.state_bits = 0;
-        out.offset_x = 0;
-        out.offset_y = 0;
+        out.toplevel_state = view.win.state_bits;
+        out.wm_capabilities = view.win.wm_capabilities;
+        out.offset_from_parent = .{ .x = 0, .y = 0 };
         return .ok;
     }
 
@@ -359,6 +421,159 @@ const App = struct {
         if (!app.ctx_ready) return .backend_failed;
         const view = app.viewForId(view_id) orelse return .unknown_view;
         view.callbacks = callbacks.*;
+        return .ok;
+    }
+
+    fn bridgeSetTitle(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        title: ?[*:0]const u8,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        if (title) |value| view.win.setTitle(value);
+        view.setViewTitleZ(title);
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeSetSize(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        size: windowing.Size,
+    ) windowing.Status {
+        _ = ctx;
+        _ = view_id;
+        _ = size;
+        return .ok;
+    }
+
+    fn bridgeSetConstraints(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        min: windowing.Size,
+        max: windowing.Size,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        view.win.setMinSize(min);
+        view.win.setMaxSize(max);
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeActivate(ctx: ?*anyopaque, view_id: i64) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        _ = app.viewForId(view_id) orelse return .unknown_view;
+        // No xdg_activation_v1: the compositor decides whether to focus.
+        return .ok;
+    }
+
+    fn bridgeSetMaximized(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        maximized: bool,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        view.win.setMaximized(maximized);
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeSetMinimized(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        minimized: bool,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        view.win.setMinimized(minimized);
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeSetFullscreen(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        fullscreen: bool,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        view.win.setFullscreen(fullscreen);
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeSetParent(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        parent_view_id: i64,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        if (parent_view_id == 0) {
+            view.win.setParent(null);
+        } else {
+            const parent = app.viewForId(parent_view_id) orelse return .unknown_view;
+            view.win.setParent(parent.win);
+        }
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeGetSize(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        out: *windowing.Size,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        out.* = .{
+            .width = @intCast(view.win.width),
+            .height = @intCast(view.win.height),
+        };
+        return .ok;
+    }
+
+    fn bridgeGetState(ctx: ?*anyopaque, view_id: i64, out: *u32) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        out.* = view.win.state_bits;
+        return .ok;
+    }
+
+    fn bridgeGetCapabilities(ctx: ?*anyopaque, view_id: i64, out: *u32) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        out.* = view.win.wm_capabilities;
+        return .ok;
+    }
+
+    fn bridgeGetTitle(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        buf: [*]u8,
+        len: u32,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        if (len == 0) return .ok;
+        const n = @min(view.title_len, @as(usize, len) - 1);
+        @memcpy(buf[0..n], view.title[0..n]);
+        buf[n] = 0;
+        return .ok;
+    }
+
+    fn bridgeGetOffset(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        out: *windowing.Offset,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        _ = app.viewForId(view_id) orelse return .unknown_view;
+        // Popups land in Stage 3; a toplevel has no parent-relative offset.
+        out.* = .{ .x = 0, .y = 0 };
         return .ok;
     }
 };
@@ -434,8 +649,9 @@ fn addViewSyncCallback(result: [*c]const c.FlutterAddViewResult) callconv(.c) vo
 }
 
 /// Add a view and require the engine to have finished before returning. This is
-/// only synchronous because the UI task runner is the main thread (see
-/// `Engine.onMainThread`): `RunNowOrPostTask` runs the add task inline.
+/// only synchronous because the UI task runner is the main thread (see the
+/// task-runner comment in `engine.zig`): `RunNowOrPostTask` runs the add task
+/// inline.
 fn beginAddViewSync(self: *App, view: *View) !void {
     try self.ctx.eng.addView(
         view.id,
@@ -455,9 +671,8 @@ fn beginAddViewSync(self: *App, view: *View) !void {
 /// reached through the same C entry points Dart uses.
 fn runWindowingSpike(self: *App) void {
     var request = std.mem.zeroes(windowing.WindowRequest);
-    request.kind = @backingInt(windowing.Kind.regular);
-    request.width = 640;
-    request.height = 480;
+    request.kind = @backingInt(windowing.Kind.toplevel);
+    request.size = .{ .width = 640, .height = 480 };
     request.resizable = 1;
     request.decorated = 1;
     request.title = "fembed windowing spike";
@@ -469,9 +684,47 @@ fn runWindowingSpike(self: *App) void {
         "fembed: windowing spike create rc={} view={} added_synchronously={}\n",
         .{ result, handle.view_id, added },
     );
-    if (result == 0) {
-        _ = windowing.filo_window_destroy(handle.view_id);
-    }
+    if (result != 0) return;
+
+    var callbacks = windowing.empty_callbacks;
+    callbacks.on_configure = spikeOnConfigure;
+    callbacks.on_state = spikeOnState;
+    callbacks.on_capabilities = spikeOnCapabilities;
+    callbacks.on_close = spikeOnClose;
+    _ = windowing.filo_window_observe(handle.view_id, &callbacks);
+
+    _ = windowing.filo_window_set_title(handle.view_id, "fembed windowing spike");
+    _ = windowing.filo_window_set_constraints(handle.view_id, 320, 240, 1920, 1080);
+    _ = windowing.filo_window_set_maximized(handle.view_id, 1);
+
+    var size = std.mem.zeroes(windowing.Size);
+    var state: u32 = 0;
+    var capabilities: u32 = 0;
+    _ = windowing.filo_window_get_size(handle.view_id, &size);
+    _ = windowing.filo_window_get_state(handle.view_id, &state);
+    _ = windowing.filo_window_get_capabilities(handle.view_id, &capabilities);
+    std.debug.print(
+        "fembed: windowing spike state={b} capabilities={b} size={}x{}\n",
+        .{ state, capabilities, size.width, size.height },
+    );
+
+    _ = windowing.filo_window_destroy(handle.view_id);
+}
+
+fn spikeOnConfigure(width: i32, height: i32) callconv(.c) void {
+    std.debug.print("fembed: windowing spike on_configure={}x{}\n", .{ width, height });
+}
+
+fn spikeOnState(state: u32) callconv(.c) void {
+    std.debug.print("fembed: windowing spike on_state={b}\n", .{state});
+}
+
+fn spikeOnCapabilities(capabilities: u32) callconv(.c) void {
+    std.debug.print("fembed: windowing spike on_capabilities={b}\n", .{capabilities});
+}
+
+fn spikeOnClose() callconv(.c) void {
+    std.debug.print("fembed: windowing spike on_close\n", .{});
 }
 
 /// The embedder's side of a `FlutterBackingStore`: the Vulkan image the engine
@@ -773,7 +1026,24 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
     }
 
     for (self.views.items) |view| {
-        if (view.win.closing or view.destroy_requested) {
+        // A compositor close request is not a destroy: tell the app and let it
+        // decide. Without an observer (the legacy `fembed/windows` path) keep
+        // the old auto-remove behaviour.
+        if (view.win.closing) {
+            view.win.closing = false;
+            if (!view.destroy_requested) {
+                if (view.callbacks.on_close) |on_close| {
+                    on_close();
+                } else if (view.id == 0) {
+                    loop.stop();
+                    return;
+                } else {
+                    view.destroy_requested = true;
+                }
+            }
+        }
+
+        if (view.destroy_requested) {
             if (view.id == 0) {
                 loop.stop();
                 return;
@@ -794,7 +1064,7 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
             }
             continue;
         }
-        if (view.added) view.win.applyResize(self.ctx.eng, view.id);
+        if (view.added) view.emitWindowEvents(self.ctx.eng);
     }
 
     self.ctx.eng.frame_period_ns = self.ctx.conn.frame_period_ns;
