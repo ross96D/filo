@@ -236,6 +236,12 @@ pub const Engine = struct {
             .identifier = 0,
             .destruction_callback = null,
         };
+        // Both the platform and the UI task runner are this one TaskRunner,
+        // drained on the main thread. That is what makes `FlutterEngineAddView`
+        // synchronous for `filo_window_create`: the engine's `RunNowOrPostTask`
+        // sees the UI runner on the current thread and runs the add inline.
+        // Splitting the UI runner onto another thread would break the
+        // windowing contract.
         self.custom_task_runners = .{
             .struct_size = @sizeOf(c.FlutterCustomTaskRunners),
             .platform_task_runner = &self.task_runner_description,

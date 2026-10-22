@@ -21,4 +21,5 @@ test {
     _ = @import("flutter/window_manager.zig");
     _ = @import("vulkan.zig");
     _ = @import("wayland/window.zig");
+    _ = @import("windowing.zig");
 }

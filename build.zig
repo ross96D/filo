@@ -67,6 +67,11 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("wayland-client", .{});
     exe.root_module.linkSystemLibrary("xkbcommon", .{});
 
+    // `src/windowing.zig` exports the `filo_window_*` C ABI. Dart reaches it
+    // through `DynamicLibrary.executable()`, which needs the symbols in the
+    // executable's dynamic symbol table.
+    exe.rdynamic = true;
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

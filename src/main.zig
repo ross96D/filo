@@ -21,6 +21,7 @@ const platform_handler = @import("flutter/platform_handler.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 const window_manager = @import("flutter/window_manager.zig");
 const mouse_cursor = @import("flutter/mouse_cursor.zig");
+const windowing = @import("windowing.zig");
 
 /// One native window and the Flutter view rendered into it.
 const View = struct {
@@ -29,14 +30,37 @@ const View = struct {
     surface: vulkan.Surface,
     /// The engine has confirmed that the view exists.
     added: bool = false,
+    /// Set by the synchronous AddView callback when the engine refused the view.
+    add_failed: bool = false,
     /// A close was requested while the engine was still adding the view.
     close_requested: bool = false,
+    /// `filo_window_destroy` asked for this view to go away.
+    destroy_requested: bool = false,
     /// RemoveView has been started; the surface must stay alive until it
     /// reports success.
     removing: bool = false,
     /// RemoveView was rejected synchronously (invalid or unknown id); do not
     /// retry it every frame.
     remove_failed: bool = false,
+    /// Backend callbacks registered through `filo_window_observe`.
+    callbacks: windowing.WindowCallbacks = windowing.empty_callbacks,
+    /// The title the bridge last set, kept so the handle/getter can return it.
+    title: [256]u8 = @splat(0),
+    title_len: usize = 0,
+
+    /// Store the title the bridge exposes to Dart, truncated to the fixed buffer
+    /// that backs `FiloWindowHandle.title` and the future `get_title`.
+    fn setViewTitleZ(self: *View, title: ?[*:0]const u8) void {
+        const src = if (title) |t| std.mem.span(t) else "";
+        const n = @min(src.len, self.title.len - 1);
+        @memcpy(self.title[0..n], src[0..n]);
+        self.title[n] = 0;
+        self.title_len = n;
+    }
+
+    fn viewTitleZ(self: *View) [*:0]const u8 {
+        return @ptrCast(&self.title);
+    }
 };
 
 /// The one struct the callbacks reach into: it is the engine's `user_data`
@@ -66,6 +90,10 @@ const App = struct {
     display_probe: ev.PipePoll = .init(-1, .read),
     platform_probe: ev.PipePoll = .init(-1, .read),
     err: ?anyerror = null,
+    /// `FEMBED_WINDOWING_SPIKE`: create and destroy one regular window from the
+    /// event loop, to prove `AddView` completes synchronously on this thread.
+    windowing_spike: bool = false,
+    windowing_spike_done: bool = false,
 
     fn viewForId(self: *App, id: engine.ViewId) ?*View {
         return self.views_by_id.get(id);
@@ -263,6 +291,76 @@ const App = struct {
         };
         return true;
     }
+
+    pub fn toHost(self: *App) windowing.Host {
+        return .{ .ctx = self, .vtable = .{
+            .create = bridgeCreate,
+            .destroy = bridgeDestroy,
+            .observe = bridgeObserve,
+        } };
+    }
+
+    fn bridgeCreate(
+        ctx: ?*anyopaque,
+        req: *const windowing.WindowRequest,
+        out: *windowing.WindowHandle,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        if (!app.ctx_ready) return .backend_failed;
+
+        const kind = std.enums.fromInt(windowing.Kind, req.kind) orelse return .invalid_argument;
+        // Stage 1 only implements regular toplevel windows.
+        if (kind != .regular) return .unsupported;
+
+        const width: u32 = if (req.width > 0) @intCast(@min(req.width, 16_384)) else 800;
+        const height: u32 = if (req.height > 0) @intCast(@min(req.height, 16_384)) else 600;
+
+        const view = app.createView(width, height) catch |err| {
+            std.debug.print("fembed: windowing create: could not create window: {}\n", .{err});
+            return .backend_failed;
+        };
+
+        if (req.title) |title| view.win.toplevel.setTitle(title);
+        view.setViewTitleZ(req.title);
+
+        beginAddViewSync(app, view) catch |err| {
+            std.debug.print("fembed: windowing create: AddView failed: {}\n", .{err});
+            if (err == error.AddViewNotSynchronous) {
+                @panic("Multiwindow feature needs the dart code and the embedder code to run in the same thread");
+            } else {
+                app.destroyView(view);
+            }
+            return .backend_failed;
+        };
+
+        out.view_id = view.id;
+        out.content_width = @intCast(view.win.width);
+        out.content_height = @intCast(view.win.height);
+        out.title = view.viewTitleZ();
+        out.state_bits = 0;
+        out.offset_x = 0;
+        out.offset_y = 0;
+        return .ok;
+    }
+
+    fn bridgeDestroy(ctx: ?*anyopaque, view_id: i64) void {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        if (!app.ctx_ready) return;
+        const view = app.viewForId(view_id) orelse return;
+        view.destroy_requested = true;
+    }
+
+    fn bridgeObserve(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        callbacks: *const windowing.WindowCallbacks,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        if (!app.ctx_ready) return .backend_failed;
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        view.callbacks = callbacks.*;
+        return .ok;
+    }
 };
 
 const ViewOpKind = enum { add, remove };
@@ -305,6 +403,7 @@ fn runViewOp(user_data: ?*anyopaque) void {
         },
         .remove => if (op.ok) {
             std.debug.print("fembed: view {} removed\n", .{view.id});
+            if (view.callbacks.on_destroy) |on_destroy| on_destroy();
             app.destroyView(view);
         } else {
             std.debug.print("fembed: view {} could not be removed\n", .{view.id});
@@ -314,6 +413,65 @@ fn runViewOp(user_data: ?*anyopaque) void {
     }
 
     app.ctx.allocator.destroy(op);
+}
+
+//------------------------------------------------------------------------------
+// filo_windowing bridge
+//------------------------------------------------------------------------------
+
+/// The callback `AddView` invokes. On this embedder it runs inline, on the main
+/// thread, before `Engine.addView` returns. The `*View` is the baton and is
+/// stable for the view's whole life, so an unexpected late dispatch is still
+/// safe (it just sets the flag later).
+fn addViewSyncCallback(result: [*c]const c.FlutterAddViewResult) callconv(.c) void {
+    if (result == null or result.*.user_data == null) return;
+    const view: *View = @ptrCast(@alignCast(result.*.user_data.?));
+    if (result.*.added) {
+        view.added = true;
+    } else {
+        view.add_failed = true;
+    }
+}
+
+/// Add a view and require the engine to have finished before returning. This is
+/// only synchronous because the UI task runner is the main thread (see
+/// `Engine.onMainThread`): `RunNowOrPostTask` runs the add task inline.
+fn beginAddViewSync(self: *App, view: *View) !void {
+    try self.ctx.eng.addView(
+        view.id,
+        view.win.width,
+        view.win.height,
+        view.win.pixel_ratio,
+        view,
+        addViewSyncCallback,
+    );
+    if (view.added) return;
+    if (view.add_failed) return error.AddViewFailed;
+    return error.AddViewNotSynchronous;
+}
+
+/// `FEMBED_WINDOWING_SPIKE`: exercise the exported create path from the event
+/// loop. It proves the view is added synchronously and that the bridge can be
+/// reached through the same C entry points Dart uses.
+fn runWindowingSpike(self: *App) void {
+    var request = std.mem.zeroes(windowing.WindowRequest);
+    request.kind = @backingInt(windowing.Kind.regular);
+    request.width = 640;
+    request.height = 480;
+    request.resizable = 1;
+    request.decorated = 1;
+    request.title = "fembed windowing spike";
+
+    var handle = std.mem.zeroes(windowing.WindowHandle);
+    const result = windowing.filo_window_create(&request, &handle);
+    const added = if (self.viewForId(handle.view_id)) |view| view.added else false;
+    std.debug.print(
+        "fembed: windowing spike create rc={} view={} added_synchronously={}\n",
+        .{ result, handle.view_id, added },
+    );
+    if (result == 0) {
+        _ = windowing.filo_window_destroy(handle.view_id);
+    }
 }
 
 /// The embedder's side of a `FlutterBackingStore`: the Vulkan image the engine
@@ -609,8 +767,13 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
         return;
     }
 
+    if (self.windowing_spike and !self.windowing_spike_done) {
+        self.windowing_spike_done = true;
+        runWindowingSpike(self);
+    }
+
     for (self.views.items) |view| {
-        if (view.win.closing) {
+        if (view.win.closing or view.destroy_requested) {
             if (view.id == 0) {
                 loop.stop();
                 return;
@@ -681,6 +844,7 @@ pub fn main(init: std.process.Init) !void {
         .ctx = undefined,
         .vk = &vk_ctx,
         .channels = platform_channel.Registry.init(allocator),
+        .windowing_spike = init.environ_map.get("FEMBED_WINDOWING_SPIKE") != null,
     };
     defer app.channels.deinit();
     defer app.deinitViews();
@@ -718,6 +882,11 @@ pub fn main(init: std.process.Init) !void {
     app.ctx = .{ .allocator = allocator, .loop = &loop, .conn = conn, .eng = eng };
     app.frame_clock = try frame_clock.FrameClock.init(&app.ctx, conn.frame_period_ns);
     app.ctx_ready = true;
+
+    // The C ABI Dart binds to (`filo_window_*`). `windowing_host` outlives the
+    // loop, and `app` is the same stack frame, so the pointers stay valid.
+    const windowing_host = app.toHost();
+    windowing.install(windowing_host);
 
     const first_view = try app.adoptView(0, first_win);
     first_view.added = true;
