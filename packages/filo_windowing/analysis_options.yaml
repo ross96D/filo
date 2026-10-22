@@ -1,0 +1,17 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # The windowing API is deliberately experimental and lives in an
+    # implementation library of package:flutter.
+    implementation_imports: ignore
+    invalid_use_of_internal_member: ignore
+  exclude:
+    - build/**
+
+linter:
+  rules:
+    always_declare_return_types: true
+    avoid_print: true
+    prefer_initializing_formals: false
+    prefer_single_quotes: true

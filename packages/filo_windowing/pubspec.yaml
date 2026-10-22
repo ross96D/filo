@@ -1,0 +1,17 @@
+name: filo_windowing
+description: A WindowingOwner implementation for the Filo custom Flutter embedder.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.5
+  flutter: ">=3.47.0 <3.48.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
