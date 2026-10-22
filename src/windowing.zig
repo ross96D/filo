@@ -138,13 +138,7 @@ pub const empty_callbacks = WindowCallbacks{
     .on_destroy = null,
 };
 
-pub const Status = enum(i32) {
-    ok = 0,
-    invalid_argument = 1,
-    unknown_view = 2,
-    unsupported = 3,
-    backend_failed = 4
-};
+pub const Status = enum(i32) { ok = 0, invalid_argument = 1, unknown_view = 2, unsupported = 3, backend_failed = 4 };
 
 /// The embedder's implementation of the ABI. `main.zig` fills this in and calls
 /// `install` once the `App` exists.
@@ -165,6 +159,7 @@ pub const Host = struct {
         set_minimized: *const fn (ctx: ?*anyopaque, view_id: i64, minimized: bool) Status,
         set_fullscreen: *const fn (ctx: ?*anyopaque, view_id: i64, fullscreen: bool) Status,
         set_parent: *const fn (ctx: ?*anyopaque, view_id: i64, parent_view_id: i64) Status,
+        update_position: *const fn (ctx: ?*anyopaque, view_id: i64, anchor: ?*const Rect, positioner: ?*const Positioner) Status,
 
         get_size: *const fn (ctx: ?*anyopaque, view_id: i64, out: *Size) Status,
         get_state: *const fn (ctx: ?*anyopaque, view_id: i64, out: *u32) Status,
@@ -215,6 +210,15 @@ pub const Host = struct {
 
     pub fn setParent(self: Host, view_id: i64, parent_view_id: i64) Status {
         return self.vtable.set_parent(self.ctx, view_id, parent_view_id);
+    }
+
+    pub fn updatePosition(
+        self: Host,
+        view_id: i64,
+        anchor: ?*const Rect,
+        positioner: ?*const Positioner,
+    ) Status {
+        return self.vtable.update_position(self.ctx, view_id, anchor, positioner);
     }
 
     pub fn getSize(self: Host, view_id: i64, out: *Size) Status {
@@ -311,6 +315,14 @@ pub export fn filo_window_set_parent(view_id: i64, parent_view_id: i64) i32 {
     return @backingInt(host.setParent(view_id, parent_view_id));
 }
 
+pub export fn filo_window_update_position(
+    view_id: i64,
+    anchor: ?*const Rect,
+    positioner: ?*const Positioner,
+) i32 {
+    return @backingInt(host.updatePosition(view_id, anchor, positioner));
+}
+
 pub export fn filo_window_get_size(view_id: i64, out: ?*Size) i32 {
     const size = out orelse return @backingInt(Status.invalid_argument);
     return @backingInt(host.getSize(view_id, size));
@@ -387,6 +399,10 @@ fn testStatusParent(_: ?*anyopaque, _: i64, _: i64) Status {
     return .unsupported;
 }
 
+fn testUpdatePosition(_: ?*anyopaque, _: i64, _: ?*const Rect, _: ?*const Positioner) Status {
+    return .unsupported;
+}
+
 fn testStatusTitle(_: ?*anyopaque, _: i64, _: ?[*:0]const u8) Status {
     return .unsupported;
 }
@@ -422,6 +438,7 @@ test "the exported entry points forward to the host" {
             .set_minimized = testStatusBool,
             .set_fullscreen = testStatusBool,
             .set_parent = testStatusParent,
+            .update_position = testUpdatePosition,
             .get_size = testGetSize,
             .get_state = testGetU32,
             .get_capabilities = testGetU32,

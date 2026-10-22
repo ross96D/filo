@@ -7,6 +7,7 @@ const c = @import("flutter");
 const vk = @import("vulkan");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
+const xdg = wayland.client.xdg;
 
 const engine = @import("engine.zig");
 const connection = @import("wayland/connection.zig");
@@ -78,6 +79,12 @@ const View = struct {
         if (self.win.capabilities_dirty) {
             self.win.capabilities_dirty = false;
             if (self.callbacks.on_capabilities) |on_capabilities| on_capabilities(self.win.wm_capabilities);
+        }
+        if (self.win.offset_dirty) {
+            self.win.offset_dirty = false;
+            if (self.callbacks.on_moved) |on_moved| {
+                on_moved(self.win.offset_from_parent.x, self.win.offset_from_parent.y);
+            }
         }
     }
 };
@@ -171,6 +178,94 @@ const App = struct {
 
         // The initial configure normally carries the real size; these are the
         // fallback when the compositor leaves the choice to us.
+        if (width > 0) win.width = width;
+        if (height > 0) win.height = height;
+        try self.ctx.conn.waitReady(win);
+
+        const view = try self.adoptView(id, win);
+        owned = false;
+        return view;
+    }
+
+    /// Create a toplevel from a windowing request and apply its properties.
+    fn createToplevel(self: *App, req: *const windowing.WindowRequest) !*View {
+        const width: u32 = if (req.size.width > 0) @min(req.size.width, 16_384) else 800;
+        const height: u32 = if (req.size.height > 0) @min(req.size.height, 16_384) else 600;
+
+        const view = try self.createView(width, height);
+        errdefer self.destroyView(view);
+
+        if (req.parent_view_id >= 0) {
+            const parent = self.viewForId(req.parent_view_id) orelse return error.UnknownParent;
+            view.win.setParent(parent.win);
+        }
+
+        if (req.title) |title| view.win.setTitle(title);
+        view.setViewTitleZ(req.title);
+
+        if (req.resizable == 0) {
+            const fixed = if (req.size.width > 0 and req.size.height > 0)
+                windowing.Size{ .width = req.size.width, .height = req.size.height }
+            else
+                windowing.Size{ .width = view.win.width, .height = view.win.height };
+            view.win.setMinSize(fixed);
+            view.win.setMaxSize(fixed);
+        } else {
+            view.win.setMinSize(req.min_size);
+            view.win.setMaxSize(req.max_size);
+        }
+        // The xdg_toplevel requests above are double-buffered.
+        view.win.commit();
+
+        // The initial state is returned in the handle; do not replay it as
+        // events once the caller registers its callbacks.
+        view.win.resized = false;
+        view.win.state_dirty = false;
+        view.win.capabilities_dirty = false;
+        return view;
+    }
+
+    /// Create a popup from a windowing request and apply its initial position.
+    fn createPopup(self: *App, req: *const windowing.WindowRequest) !*View {
+        if (req.parent_view_id < 0) return error.InvalidParent;
+        const parent = self.viewForId(req.parent_view_id) orelse return error.UnknownParent;
+
+        var positioner = req.positioner;
+        if (positioner.size.width == 0 or positioner.size.height == 0) positioner.size = req.size;
+        if (positioner.size.width == 0 or positioner.size.height == 0) {
+            positioner.size = .{ .width = 1, .height = 1 };
+        }
+
+        const xdg_positioner = try makePositioner(self, positioner);
+        defer xdg_positioner.destroy();
+
+        const width: u32 = @min(positioner.size.width, 16_384);
+        const height: u32 = @min(positioner.size.height, 16_384);
+
+        const view = try self.createPopupView(parent, xdg_positioner, width, height);
+        errdefer self.destroyView(view);
+
+        view.win.positioner = positioner;
+        view.win.resized = false;
+        view.win.offset_dirty = false;
+        return view;
+    }
+
+    /// Open a popup window attached to `parent` and register a view for it.
+    fn createPopupView(
+        self: *App,
+        parent: *View,
+        positioner: *xdg.Positioner,
+        width: u32,
+        height: u32,
+    ) !*View {
+        const id = self.reserveViewId();
+        const win = try self.ctx.conn.createPopup(parent.win, positioner);
+        var owned = true;
+        errdefer {
+            if (owned) win.destroy(self.ctx.allocator);
+        }
+
         if (width > 0) win.width = width;
         if (height > 0) win.height = height;
         try self.ctx.conn.waitReady(win);
@@ -324,6 +419,7 @@ const App = struct {
             .set_minimized = bridgeSetMinimized,
             .set_fullscreen = bridgeSetFullscreen,
             .set_parent = bridgeSetParent,
+            .update_position = bridgeUpdatePosition,
             .get_size = bridgeGetSize,
             .get_state = bridgeGetState,
             .get_capabilities = bridgeGetCapabilities,
@@ -341,47 +437,24 @@ const App = struct {
         if (!app.ctx_ready) return .backend_failed;
 
         const kind = std.enums.fromInt(windowing.Kind, req.kind) orelse return .invalid_argument;
-        // Stage 1 only implements toplevel windows.
-        if (kind != .toplevel) return .unsupported;
 
-        const width: u32 = if (req.size.width > 0) @intCast(@min(req.size.width, 16_384)) else 800;
-        const height: u32 = if (req.size.height > 0) @intCast(@min(req.size.height, 16_384)) else 600;
-
-        const view = app.createView(width, height) catch |err| {
-            std.debug.print("fembed: windowing create: could not create window: {}\n", .{err});
-            return .backend_failed;
+        const view = switch (kind) {
+            .toplevel => app.createToplevel(req) catch |err| {
+                std.debug.print("fembed: windowing create: could not create window: {}\n", .{err});
+                return switch (err) {
+                    error.UnknownParent => .unknown_view,
+                    else => .backend_failed,
+                };
+            },
+            .popup => app.createPopup(req) catch |err| {
+                std.debug.print("fembed: windowing create: could not create popup: {}\n", .{err});
+                return switch (err) {
+                    error.UnknownParent => .unknown_view,
+                    error.InvalidParent => .invalid_argument,
+                    else => .backend_failed,
+                };
+            },
         };
-
-        if (req.parent_view_id >= 0) {
-            const parent = app.viewForId(req.parent_view_id) orelse {
-                app.destroyView(view);
-                return .unknown_view;
-            };
-            view.win.setParent(parent.win);
-        }
-
-        if (req.title) |title| view.win.setTitle(title);
-        view.setViewTitleZ(req.title);
-
-        if (req.resizable == 0) {
-            const fixed = if (req.size.width > 0 and req.size.height > 0)
-                windowing.Size{ .width = req.size.width, .height = req.size.height }
-            else
-                windowing.Size{ .width = @intCast(view.win.width), .height = @intCast(view.win.height) };
-            view.win.setMinSize(fixed);
-            view.win.setMaxSize(fixed);
-        } else {
-            view.win.setMinSize(req.min_size);
-            view.win.setMaxSize(req.max_size);
-        }
-        // The xdg_toplevel requests above are double-buffered.
-        view.win.commit();
-
-        // The initial state is returned in the handle; do not replay it as
-        // events once the caller registers its callbacks.
-        view.win.resized = false;
-        view.win.state_dirty = false;
-        view.win.capabilities_dirty = false;
 
         beginAddViewSync(app, view) catch |err| {
             std.debug.print("fembed: windowing create: AddView failed: {}\n", .{err});
@@ -395,13 +468,13 @@ const App = struct {
 
         out.view_id = view.id;
         out.content_size = .{
-            .width = @intCast(view.win.width),
-            .height = @intCast(view.win.height),
+            .width = view.win.width,
+            .height = view.win.height,
         };
-        out.title = view.viewTitleZ();
+        out.title = if (kind == .toplevel) view.viewTitleZ() else null;
         out.toplevel_state = view.win.state_bits;
         out.wm_capabilities = view.win.wm_capabilities;
-        out.offset_from_parent = .{ .x = 0, .y = 0 };
+        out.offset_from_parent = view.win.offset_from_parent;
         return .ok;
     }
 
@@ -512,12 +585,35 @@ const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        if (parent_view_id == 0) {
+        if (parent_view_id < 0) {
             view.win.setParent(null);
         } else {
             const parent = app.viewForId(parent_view_id) orelse return .unknown_view;
             view.win.setParent(parent.win);
         }
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeUpdatePosition(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        anchor: ?*const windowing.Rect,
+        positioner: ?*const windowing.Positioner,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        if (!view.win.isPopup()) return .unsupported;
+
+        var request = view.win.positioner;
+        if (positioner) |value| request = value.*;
+        if (anchor) |value| request.anchor_rect = value.*;
+
+        const xdg_positioner = makePositioner(app, request) catch return .backend_failed;
+        defer xdg_positioner.destroy();
+
+        view.win.reposition(xdg_positioner);
+        view.win.positioner = request;
         view.win.commit();
         return .ok;
     }
@@ -571,12 +667,61 @@ const App = struct {
         out: *windowing.Offset,
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
-        _ = app.viewForId(view_id) orelse return .unknown_view;
-        // Popups land in Stage 3; a toplevel has no parent-relative offset.
-        out.* = .{ .x = 0, .y = 0 };
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        out.* = view.win.offset_from_parent;
         return .ok;
     }
 };
+
+/// Build an `xdg_positioner` from the ABI positioner. The caller owns and
+/// destroys it.
+fn makePositioner(app: *App, p: windowing.Positioner) !*xdg.Positioner {
+    const positioner = try app.ctx.conn.wm_base.createPositioner();
+    errdefer positioner.destroy();
+
+    positioner.setSize(@intCast(p.size.width), @intCast(p.size.height));
+    positioner.setAnchorRect(
+        p.anchor_rect.x,
+        p.anchor_rect.y,
+        p.anchor_rect.width,
+        p.anchor_rect.height,
+    );
+    positioner.setAnchor(anchorFromInt(p.anchor));
+    positioner.setGravity(gravityFromInt(p.gravity));
+    positioner.setConstraintAdjustment(@bitCast(p.constraint_adjustment));
+    positioner.setOffset(p.offset.x, p.offset.y);
+    return positioner;
+}
+
+fn anchorFromInt(value: i32) xdg.Positioner.Anchor {
+    return switch (value) {
+        0 => .none,
+        1 => .top,
+        2 => .bottom,
+        3 => .left,
+        4 => .right,
+        5 => .top_left,
+        6 => .bottom_left,
+        7 => .top_right,
+        8 => .bottom_right,
+        else => .none,
+    };
+}
+
+fn gravityFromInt(value: i32) xdg.Positioner.Gravity {
+    return switch (value) {
+        0 => .none,
+        1 => .top,
+        2 => .bottom,
+        3 => .left,
+        4 => .right,
+        5 => .top_left,
+        6 => .bottom_left,
+        7 => .top_right,
+        8 => .bottom_right,
+        else => .none,
+    };
+}
 
 const ViewOpKind = enum { add, remove };
 
@@ -690,6 +835,7 @@ fn runWindowingSpike(self: *App) void {
     callbacks.on_configure = spikeOnConfigure;
     callbacks.on_state = spikeOnState;
     callbacks.on_capabilities = spikeOnCapabilities;
+    callbacks.on_moved = spikeOnMoved;
     callbacks.on_close = spikeOnClose;
     _ = windowing.filo_window_observe(handle.view_id, &callbacks);
 
@@ -708,6 +854,49 @@ fn runWindowingSpike(self: *App) void {
         .{ state, capabilities, size.width, size.height },
     );
 
+    // A popup attached to that toplevel: xdg_popup + xdg_positioner.
+    var popup_request = std.mem.zeroes(windowing.WindowRequest);
+    popup_request.kind = @backingInt(windowing.Kind.popup);
+    popup_request.size = .{ .width = 200, .height = 120 };
+    popup_request.parent_view_id = handle.view_id;
+    popup_request.decorated = 0;
+    popup_request.positioner = .{
+        .size = .{ .width = 200, .height = 120 },
+        .anchor_rect = .{ .x = 10, .y = 10, .width = 100, .height = 30 },
+        .anchor = 2, // bottom
+        .gravity = 1, // top
+        .constraint_adjustment = 0,
+        .offset = .{ .x = 0, .y = 0 },
+    };
+
+    var popup_handle = std.mem.zeroes(windowing.WindowHandle);
+    const popup_result = windowing.filo_window_create(&popup_request, &popup_handle);
+    std.debug.print(
+        "fembed: windowing spike popup rc={} view={} offset={},{}\n",
+        .{
+            popup_result,
+            popup_handle.view_id,
+            popup_handle.offset_from_parent.x,
+            popup_handle.offset_from_parent.y,
+        },
+    );
+
+    if (popup_result == 0) {
+        _ = windowing.filo_window_observe(popup_handle.view_id, &callbacks);
+        _ = windowing.filo_window_update_position(
+            popup_handle.view_id,
+            null,
+            &popup_request.positioner,
+        );
+        var offset = std.mem.zeroes(windowing.Offset);
+        _ = windowing.filo_window_get_offset(popup_handle.view_id, &offset);
+        std.debug.print(
+            "fembed: windowing spike popup offset after update={},{}\n",
+            .{ offset.x, offset.y },
+        );
+        _ = windowing.filo_window_destroy(popup_handle.view_id);
+    }
+
     _ = windowing.filo_window_destroy(handle.view_id);
 }
 
@@ -721,6 +910,10 @@ fn spikeOnState(state: u32) callconv(.c) void {
 
 fn spikeOnCapabilities(capabilities: u32) callconv(.c) void {
     std.debug.print("fembed: windowing spike on_capabilities={b}\n", .{capabilities});
+}
+
+fn spikeOnMoved(x: i32, y: i32) callconv(.c) void {
+    std.debug.print("fembed: windowing spike on_moved={},{}\n", .{ x, y });
 }
 
 fn spikeOnClose() callconv(.c) void {
@@ -1041,6 +1234,14 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
                     view.destroy_requested = true;
                 }
             }
+        }
+
+        // A dismissed popup is already gone from the compositor's point of
+        // view (`popup_done` says the client should destroy it), so tear the
+        // view down. The controller sees the `on_destroy` event.
+        if (view.win.popup_done) {
+            view.win.popup_done = false;
+            view.destroy_requested = true;
         }
 
         if (view.destroy_requested) {

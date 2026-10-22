@@ -17,13 +17,20 @@ const default_height = 600;
 /// both mean drawing at a different size than we tell the engine.
 const default_pixel_ratio = 1.5;
 
-/// One toplevel window: a surface and its xdg-shell state. The connection it
-/// lives on, the engine it draws for, and the loop that drives it are owned
-/// elsewhere and passed in where they are needed.
+/// The xdg-shell role a surface has. Toplevels are regular windows, dialogs and
+/// satellites; popups are tooltips and popups.
+pub const Role = union(enum) {
+    toplevel: *xdg.Toplevel,
+    popup: *xdg.Popup,
+};
+
+/// One window: a surface and its xdg-shell role. The connection it lives on,
+/// the engine it draws for, and the loop that drives it are owned elsewhere and
+/// passed in where they are needed.
 pub const Window = struct {
     surface: *wl.Surface,
     xdg_surface: *xdg.Surface,
-    toplevel: *xdg.Toplevel,
+    role: Role,
 
     configured: bool = false,
     /// Size the compositor last asked for, in surface (logical) pixels. Starts
@@ -44,8 +51,20 @@ pub const Window = struct {
     wm_capabilities: u32 = 0,
     /// The compositor sent new capabilities since the last drain.
     capabilities_dirty: bool = false,
+    /// Popups: top-left corner relative to the parent client area.
+    offset_from_parent: windowing.Offset = .{ .x = 0, .y = 0 },
+    /// The compositor moved the popup since the last drain.
+    offset_dirty: bool = false,
+    /// The compositor dismissed the popup.
+    popup_done: bool = false,
+    /// The last positioner applied to a popup, so an update can change just the
+    /// anchor rectangle.
+    positioner: windowing.Positioner = std.mem.zeroes(windowing.Positioner),
+    /// Token for the next `xdg_popup.reposition`.
+    reposition_token: u32 = 0,
 
-    /// Install a window on freshly created surface/xdg/toplevel proxies.
+    /// Install a toplevel window on freshly created surface/xdg/toplevel
+    /// proxies.
     pub fn create(
         allocator: std.mem.Allocator,
         surface: *wl.Surface,
@@ -56,7 +75,7 @@ pub const Window = struct {
         self.* = .{
             .surface = surface,
             .xdg_surface = xdg_surface,
-            .toplevel = toplevel,
+            .role = .{ .toplevel = toplevel },
         };
         xdg_surface.setListener(*Window, xdgSurfaceListener, self);
         toplevel.setListener(*Window, toplevelListener, self);
@@ -64,46 +83,104 @@ pub const Window = struct {
         return self;
     }
 
+    /// Install a popup window on freshly created surface/xdg/popup proxies.
+    pub fn createPopup(
+        allocator: std.mem.Allocator,
+        surface: *wl.Surface,
+        xdg_surface: *xdg.Surface,
+        popup: *xdg.Popup,
+    ) !*Window {
+        const self = try allocator.create(Window);
+        self.* = .{
+            .surface = surface,
+            .xdg_surface = xdg_surface,
+            .role = .{ .popup = popup },
+        };
+        xdg_surface.setListener(*Window, xdgSurfaceListener, self);
+        popup.setListener(*Window, popupListener, self);
+        surface.commit();
+        return self;
+    }
+
     pub fn destroy(self: *Window, allocator: std.mem.Allocator) void {
-        self.toplevel.destroy();
+        switch (self.role) {
+            .toplevel => |toplevel| toplevel.destroy(),
+            .popup => |popup| popup.destroy(),
+        }
         self.xdg_surface.destroy();
         self.surface.destroy();
         allocator.destroy(self);
     }
 
+    pub fn isPopup(self: *const Window) bool {
+        return switch (self.role) {
+            .popup => true,
+            .toplevel => false,
+        };
+    }
+
+    fn toplevelRole(self: *Window) ?*xdg.Toplevel {
+        return switch (self.role) {
+            .toplevel => |toplevel| toplevel,
+            .popup => null,
+        };
+    }
+
     /// Queue the xdg_toplevel requests below. They are double-buffered, so the
-    /// caller commits the surface (`commit`) once after a batch.
+    /// caller commits the surface (`commit`) once after a batch. They are
+    /// no-ops for a popup, which has no such requests.
     pub fn setTitle(self: *Window, title: [*:0]const u8) void {
-        self.toplevel.setTitle(title);
+        if (self.toplevelRole()) |toplevel| toplevel.setTitle(title);
     }
 
     pub fn setMinSize(self: *Window, size: windowing.Size) void {
-        self.toplevel.setMinSize(@intCast(size.width), @intCast(size.height));
+        if (self.toplevelRole()) |toplevel| {
+            toplevel.setMinSize(@intCast(size.width), @intCast(size.height));
+        }
     }
 
     pub fn setMaxSize(self: *Window, size: windowing.Size) void {
-        self.toplevel.setMaxSize(@intCast(size.width), @intCast(size.height));
+        if (self.toplevelRole()) |toplevel| {
+            toplevel.setMaxSize(@intCast(size.width), @intCast(size.height));
+        }
     }
 
     pub fn setMaximized(self: *Window, maximized: bool) void {
-        if (maximized) self.toplevel.setMaximized() else self.toplevel.unsetMaximized();
+        const toplevel = self.toplevelRole() orelse return;
+        if (maximized) toplevel.setMaximized() else toplevel.unsetMaximized();
     }
 
     /// There is no unminimize request in core xdg-shell; the compositor decides
     /// how a minimized window is restored.
     pub fn setMinimized(self: *Window, minimized: bool) void {
-        if (minimized) self.toplevel.setMinimized();
+        if (self.toplevelRole()) |toplevel| {
+            if (minimized) toplevel.setMinimized();
+        }
     }
 
     pub fn setFullscreen(self: *Window, fullscreen: bool) void {
-        if (fullscreen) self.toplevel.setFullscreen(null) else self.toplevel.unsetFullscreen();
+        const toplevel = self.toplevelRole() orelse return;
+        if (fullscreen) toplevel.setFullscreen(null) else toplevel.unsetFullscreen();
     }
 
     pub fn setParent(self: *Window, parent: ?*Window) void {
-        self.toplevel.setParent(if (parent) |p| p.toplevel else null);
+        const toplevel = self.toplevelRole() orelse return;
+        toplevel.setParent(if (parent) |p| p.toplevelRole() else null);
     }
 
-    /// Apply the queued xdg_toplevel requests.
+    /// Ask the compositor to reposition a popup. The new geometry arrives in
+    /// the following `configure` event.
+    pub fn reposition(self: *Window, positioner: *xdg.Positioner) void {
+        switch (self.role) {
+            .popup => |popup| {
+                popup.reposition(positioner, self.reposition_token);
+                self.reposition_token +%= 1;
+            },
+            .toplevel => {},
+        }
+    }
+
+    /// Apply the queued xdg requests.
     pub fn commit(self: *Window) void {
         self.surface.commit();
     }
@@ -162,6 +239,26 @@ pub const Window = struct {
                 }
             },
             else => {},
+        }
+    }
+
+    fn popupListener(_: *xdg.Popup, event: xdg.Popup.Event, self: *Window) void {
+        switch (event) {
+            .configure => |configure| {
+                self.offset_from_parent = .{ .x = configure.x, .y = configure.y };
+                self.offset_dirty = true;
+
+                const size = configuredSize(configure.width, configure.height) orelse return;
+                if (size[0] == self.width and size[1] == self.height) return;
+
+                self.width = size[0];
+                self.height = size[1];
+                self.resized = true;
+            },
+            // The compositor dismissed the popup; the client should destroy it.
+            .popup_done => self.popup_done = true,
+            // The following `configure` carries the new geometry.
+            .repositioned => {},
         }
     }
 

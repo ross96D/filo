@@ -47,6 +47,9 @@ pub const Connection = struct {
     cursor_shape_device: ?*wp.CursorShapeDeviceV1 = null,
     /// The last `wl_pointer.enter` serial: the only serial `set_shape` accepts.
     pointer_enter_serial: ?u32 = null,
+    /// The most recent input serial. `xdg_popup.grab` needs one from the input
+    /// event that opened the popup.
+    last_serial: ?u32 = null,
     /// The shape the framework last asked for, re-applied on pointer enter.
     cursor: ?mouse_cursor.Cursor = null,
     cursor_shape_warned: bool = false,
@@ -155,6 +158,30 @@ pub const Connection = struct {
         return window.Window.create(self.allocator, surface, xdg_surface, toplevel);
     }
 
+    /// Create a popup attached to `parent` and positioned by `positioner`. The
+    /// positioner is only needed for this call; the caller may destroy it once
+    /// this returns.
+    pub fn createPopup(
+        self: *Connection,
+        parent: *window.Window,
+        positioner: *xdg.Positioner,
+    ) !*window.Window {
+        const surface = try self.compositor.createSurface();
+        errdefer surface.destroy();
+        const xdg_surface = try self.wm_base.getXdgSurface(surface);
+        errdefer xdg_surface.destroy();
+        const popup = try xdg_surface.getPopup(parent.xdg_surface, positioner);
+        errdefer popup.destroy();
+
+        // A grab is what lets the compositor dismiss the popup on an outside
+        // click. It needs the serial of the input event that opened it.
+        if (self.seat) |seat| {
+            if (self.last_serial) |serial| popup.grab(seat, serial);
+        }
+
+        return window.Window.createPopup(self.allocator, surface, xdg_surface, popup);
+    }
+
     /// Block until the compositor has sent the initial configure and the
     /// output's mode has been reported, so the surface is ready for buffers and
     /// the engine can be told the display it draws on.
@@ -253,6 +280,7 @@ pub const Connection = struct {
             .enter => |e| {
                 if (self.clipboard) |clip| clip.updateSerial(e.serial);
                 self.pointer_enter_serial = e.serial;
+                self.last_serial = e.serial;
                 self.applyCursor();
                 inp.pointerEnter(e.surface, e.surface_x.toDouble(), e.surface_y.toDouble());
             },
@@ -265,6 +293,7 @@ pub const Connection = struct {
             },
             .button => |b| {
                 if (self.clipboard) |clip| clip.updateSerial(b.serial);
+                self.last_serial = b.serial;
                 inp.pointerButton(b.button, b.state == .pressed, b.time);
             },
             .axis => |a| {
@@ -295,6 +324,7 @@ pub const Connection = struct {
                 // `set_selection` is only accepted with a serial from a recent
                 // seat event, and gaining focus is one.
                 if (self.clipboard) |clip| clip.updateSerial(e.serial);
+                self.last_serial = e.serial;
                 inp.keyboardEnter(e.surface);
             },
             .leave => {
@@ -302,6 +332,7 @@ pub const Connection = struct {
             },
             .key => |k| {
                 if (self.clipboard) |clip| clip.updateSerial(k.serial);
+                self.last_serial = k.serial;
                 inp.handleKey(k.key + 8, k.state == .pressed, k.time);
             },
             .modifiers => |m| {
