@@ -3,10 +3,12 @@ const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
+const wp = wayland.client.wp;
 
 const engine = @import("../engine.zig");
 const input = @import("../input.zig");
 const clipboard = @import("clipboard.zig");
+const mouse_cursor = @import("../flutter/types/mouse_cursor.zig");
 const window = @import("window.zig");
 const Context = @import("../context.zig").Context;
 
@@ -15,6 +17,8 @@ const Globals = struct {
     wm_base: ?*xdg.WmBase = null,
     data_device_manager: ?*wl.DataDeviceManager = null,
     seat_name: ?u32 = null,
+    cursor_shape_manager_name: ?u32 = null,
+    cursor_shape_manager_version: u32 = 0,
     /// The first output, by registry name and version.
     output_name: ?u32 = null,
     output_version: u32 = 0,
@@ -36,6 +40,16 @@ pub const Connection = struct {
     output: ?*wl.Output = null,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
+    /// The compositor's cursor-shape-v1 support, if it advertises the global.
+    /// Without it the named cursor requests are ignored, but `none` can still
+    /// hide the pointer through `wl_pointer.set_cursor`.
+    cursor_shape_manager: ?*wp.CursorShapeManagerV1 = null,
+    cursor_shape_device: ?*wp.CursorShapeDeviceV1 = null,
+    /// The last `wl_pointer.enter` serial: the only serial `set_shape` accepts.
+    pointer_enter_serial: ?u32 = null,
+    /// The shape the framework last asked for, re-applied on pointer enter.
+    cursor: ?mouse_cursor.Cursor = null,
+    cursor_shape_warned: bool = false,
     /// The engine-facing input and clipboard handlers, wired by `bindSeat`.
     input: ?*input.Input = null,
     clipboard: ?*clipboard.Clipboard = null,
@@ -80,11 +94,18 @@ pub const Connection = struct {
             if (self.output) |output| output.setListener(*Connection, outputListener, self);
         }
 
+        if (globals.cursor_shape_manager_name) |name| {
+            const version = @min(globals.cursor_shape_manager_version, wp.CursorShapeManagerV1.generated_version);
+            self.cursor_shape_manager = registry.bind(name, wp.CursorShapeManagerV1, version) catch null;
+        }
+
         return self;
     }
 
     pub fn deinit(self: *Connection) void {
         if (self.clipboard) |clip| clip.deinit();
+        if (self.cursor_shape_device) |device| device.destroy();
+        if (self.cursor_shape_manager) |manager| manager.destroy();
         if (self.keyboard) |k| k.destroy();
         if (self.pointer) |p| p.destroy();
         if (self.output) |o| {
@@ -160,6 +181,35 @@ pub const Connection = struct {
         self.clipboard = try clipboard.Clipboard.init(ctx, self.seat.?);
     }
 
+    /// Show the cursor the framework last asked for. Call on the Wayland thread.
+    pub fn setCursor(self: *Connection, cursor: mouse_cursor.Cursor) void {
+        self.cursor = cursor;
+        self.applyCursor();
+    }
+
+    fn applyCursor(self: *Connection) void {
+        // `set_shape` and `set_cursor` only accept a serial from the latest
+        // pointer enter. Requests that arrive while the pointer is elsewhere
+        // stay stored and are applied on the next enter.
+        const serial = self.pointer_enter_serial orelse return;
+        const pointer = self.pointer orelse return;
+        const cursor = self.cursor orelse return;
+
+        switch (cursor) {
+            .hidden => pointer.setCursor(serial, null, 0, 0),
+            .shape => |shape| {
+                const device = self.cursor_shape_device orelse {
+                    if (!self.cursor_shape_warned) {
+                        std.debug.print("fembed: compositor has no wp_cursor_shape_manager_v1; ignoring cursor changes\n", .{});
+                        self.cursor_shape_warned = true;
+                    }
+                    return;
+                };
+                device.setShape(serial, protocolShape(shape));
+            },
+        }
+    }
+
     fn outputListener(_: *wl.Output, event: wl.Output.Event, self: *Connection) void {
         switch (event) {
             .mode => |mode| {
@@ -184,6 +234,9 @@ pub const Connection = struct {
                     const pointer = seat.getPointer() catch return;
                     self.pointer = pointer;
                     pointer.setListener(*Connection, pointerListener, self);
+                    if (self.cursor_shape_manager) |manager| {
+                        self.cursor_shape_device = manager.getPointer(pointer) catch null;
+                    }
                 }
                 if (caps.capabilities.keyboard and self.keyboard == null) {
                     const keyboard = seat.getKeyboard() catch return;
@@ -200,9 +253,12 @@ pub const Connection = struct {
         switch (event) {
             .enter => |e| {
                 if (self.clipboard) |clip| clip.updateSerial(e.serial);
+                self.pointer_enter_serial = e.serial;
+                self.applyCursor();
                 inp.pointerEnter(e.surface, e.surface_x.toDouble(), e.surface_y.toDouble());
             },
             .leave => {
+                self.pointer_enter_serial = null;
                 inp.pointerLeave();
             },
             .motion => |m| {
@@ -272,12 +328,58 @@ pub const Connection = struct {
                         globals.output_name = global.name;
                         globals.output_version = global.version;
                     }
+                } else if (std.mem.orderZ(u8, global.interface, wp.CursorShapeManagerV1.interface.name) == .eq) {
+                    if (globals.cursor_shape_manager_name == null) {
+                        globals.cursor_shape_manager_name = global.name;
+                        globals.cursor_shape_manager_version = global.version;
+                    }
                 }
             },
             .global_remove => {},
         }
     }
 };
+
+/// The cursor-shape-v1 shape for a framework cursor shape. The enums have the
+/// same names; this switch keeps the dependency explicit and compiler-checked.
+fn protocolShape(shape: mouse_cursor.Cursor.Shape) wp.CursorShapeDeviceV1.Shape {
+    return switch (shape) {
+        .default => .default,
+        .context_menu => .context_menu,
+        .help => .help,
+        .pointer => .pointer,
+        .progress => .progress,
+        .wait => .wait,
+        .cell => .cell,
+        .crosshair => .crosshair,
+        .text => .text,
+        .vertical_text => .vertical_text,
+        .alias => .alias,
+        .copy => .copy,
+        .move => .move,
+        .no_drop => .no_drop,
+        .not_allowed => .not_allowed,
+        .grab => .grab,
+        .grabbing => .grabbing,
+        .e_resize => .e_resize,
+        .n_resize => .n_resize,
+        .ne_resize => .ne_resize,
+        .nw_resize => .nw_resize,
+        .s_resize => .s_resize,
+        .se_resize => .se_resize,
+        .sw_resize => .sw_resize,
+        .w_resize => .w_resize,
+        .ew_resize => .ew_resize,
+        .ns_resize => .ns_resize,
+        .nesw_resize => .nesw_resize,
+        .nwse_resize => .nwse_resize,
+        .col_resize => .col_resize,
+        .row_resize => .row_resize,
+        .all_scroll => .all_scroll,
+        .zoom_in => .zoom_in,
+        .zoom_out => .zoom_out,
+    };
+}
 
 /// How long one refresh lasts, from a `wl_output` mode's refresh rate in mHz.
 fn framePeriodNs(refresh_mhz: u32) u64 {

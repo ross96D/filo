@@ -7,7 +7,6 @@ const table = @import("table.zig");
 // add reciever     flutter/platform/exitApplication
 // add sender       flutter/platform/requestAppExit
 // add sender       flutter/system with {"type": "memoryPressure"}
-// add reciever     flutter/mousecursor
 
 /// The wire codec a platform channel speaks. Replies must be encoded with the
 /// codec the framework decodes with, otherwise the framework throws while
@@ -73,7 +72,7 @@ pub const sensitive_content = Channel{ .name = "flutter/sensitivecontent", .code
 pub const windows = Channel{ .name = "fembed/windows", .codec = .json_method };
 
 /// The handler that answers a channel's messages.
-pub const Handler = enum { text_input, platform, windows };
+pub const Handler = enum { text_input, platform, windows, mouse_cursor };
 
 /// What to do with a message that arrives on a channel: which handler answers
 /// it, and the codec the framework decodes the reply with.
@@ -83,15 +82,15 @@ pub const Route = struct {
     codec: Codec = .standard_method,
 };
 
-/// Every channel we treat differently from the default: the ones that speak
-/// `JSONMethodCodec`, two of which we implement. Anything not listed here is not
-/// implemented and speaks `StandardMethodCodec`, which is the `MethodChannel`
-/// default. Each row takes its codec from the channel constant above it, so the
-/// two never drift apart.
+/// Every implemented channel, plus the channels that speak `JSONMethodCodec`
+/// instead of the `MethodChannel` default. Anything not listed here is not
+/// implemented and speaks `StandardMethodCodec`. Each row takes its codec from
+/// the channel constant above it, so the two never drift apart.
 pub const routes = [_]table.Entry(Route){
     .{ .name = text_input.name, .value = .{ .handler = .text_input, .codec = text_input.codec } },
     .{ .name = platform.name, .value = .{ .handler = .platform, .codec = platform.codec } },
     .{ .name = windows.name, .value = .{ .handler = .windows, .codec = windows.codec } },
+    .{ .name = mouse_cursor.name, .value = .{ .handler = .mouse_cursor, .codec = mouse_cursor.codec } },
     .{ .name = navigation.name, .value = .{ .codec = navigation.codec } },
     .{ .name = skia.name, .value = .{ .codec = skia.codec } },
     .{ .name = undo_manager.name, .value = .{ .codec = undo_manager.codec } },
@@ -116,6 +115,11 @@ test "routes carry the handler and codec of each channel the framework sends" {
     const windows_route = routes_table.get(windows.name).?;
     try testing.expectEqual(Handler.windows, windows_route.handler.?);
     try testing.expectEqual(Codec.json_method, windows_route.codec);
+
+    // The mouse cursor channel is implemented and speaks `StandardMethodCodec`.
+    const mouse_cursor_route = routes_table.get(mouse_cursor.name).?;
+    try testing.expectEqual(Handler.mouse_cursor, mouse_cursor_route.handler.?);
+    try testing.expectEqual(Codec.standard_method, mouse_cursor_route.codec);
 
     // A JSON channel we do not implement still carries its codec, so that the
     // framework can decode the null reply we send it.

@@ -8,6 +8,7 @@ const table = @import("table.zig");
 const text_input = @import("text_input.zig");
 const platform_handler = @import("platform_handler.zig");
 const window_manager = @import("window_manager.zig");
+const mouse_cursor = @import("mouse_cursor.zig");
 
 /// Routes the platform messages the framework sends to the handler for their
 /// channel.
@@ -21,6 +22,7 @@ pub const Registry = struct {
     text_input: ?*text_input.TextInput = null,
     platform: ?*platform_handler.PlatformHandler = null,
     windows: ?*window_manager.WindowManager = null,
+    mouse_cursor: ?*mouse_cursor.MouseCursor = null,
     /// Channel name → route, built from `channels.routes`.
     routes: table.Table(channels.Route),
 
@@ -51,24 +53,31 @@ pub const Registry = struct {
         switch (handler) {
             .text_input => {
                 const ti = self.text_input orelse {
-                    notReady(eng, response_handle, "text input");
+                    notReady(eng, route.codec, response_handle, "text input");
                     return;
                 };
                 ti.handlePlatformMessage(message);
             },
             .platform => {
                 const platform = self.platform orelse {
-                    notReady(eng, response_handle, "platform handler");
+                    notReady(eng, route.codec, response_handle, "platform handler");
                     return;
                 };
                 platform.handlePlatformMessage(message);
             },
             .windows => {
                 const windows = self.windows orelse {
-                    notReady(eng, response_handle, "window manager");
+                    notReady(eng, route.codec, response_handle, "window manager");
                     return;
                 };
                 windows.handlePlatformMessage(message);
+            },
+            .mouse_cursor => {
+                const cursor = self.mouse_cursor orelse {
+                    notReady(eng, route.codec, response_handle, "mouse cursor handler");
+                    return;
+                };
+                cursor.handlePlatformMessage(message);
             },
         }
     }
@@ -77,7 +86,20 @@ pub const Registry = struct {
 /// Answer a message whose handler has not been built yet: the engine can deliver
 /// messages as soon as it runs, which is before `main` has attached every
 /// handler.
-fn notReady(eng: *engine.Engine, handle: ?*const c.FlutterPlatformMessageResponseHandle, what: []const u8) void {
+fn notReady(
+    eng: *engine.Engine,
+    channel_codec: channels.Codec,
+    handle: ?*const c.FlutterPlatformMessageResponseHandle,
+    what: []const u8,
+) void {
+    // Only JSON method channels have an error envelope that the framework
+    // reports verbatim. A standard-codec channel has to get a reply it can
+    // decode, so acknowledge it as a success instead.
+    if (channel_codec != .json_method) {
+        eng.sendPlatformMessageResponse(handle, codec.defaultReply(channel_codec));
+        return;
+    }
+
     var message_buf: [64]u8 = undefined;
     const message = std.fmt.bufPrint(&message_buf, "{s} not ready", .{what}) catch "not ready";
     var envelope_buf: [128]u8 = undefined;
@@ -127,6 +149,13 @@ test "messages are routed by channel name and answered with that channel's codec
     var bogus_message = testMessage("flutter/bogus", "{}");
     testReset();
     registry.handle(&bogus_message);
+    try testing.expectEqualStrings("\x00\x00", testResponded());
+
+    // A standard-codec handler that is not attached yet still gets a reply the
+    // framework can decode; a JSON error envelope would make it throw.
+    var cursor_message = testMessage("flutter/mousecursor", "");
+    testReset();
+    registry.handle(&cursor_message);
     try testing.expectEqualStrings("\x00\x00", testResponded());
 
     // A handler that is not attached is reported, rather than leaving the

@@ -20,6 +20,7 @@ const text_input = @import("flutter/text_input.zig");
 const platform_handler = @import("flutter/platform_handler.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 const window_manager = @import("flutter/window_manager.zig");
+const mouse_cursor = @import("flutter/mouse_cursor.zig");
 
 /// One native window and the Flutter view rendered into it.
 const View = struct {
@@ -565,6 +566,24 @@ fn runCloseWindow(user_data: ?*anyopaque) void {
     view.win.closing = true;
 }
 
+const CursorRequest = struct {
+    conn: *connection.Connection,
+    cursor: mouse_cursor.Cursor,
+};
+
+fn onSetCursor(user_data: ?*anyopaque, cursor: mouse_cursor.Cursor) void {
+    const app: *App = @ptrCast(@alignCast(user_data.?));
+    const req = std.heap.c_allocator.create(CursorRequest) catch return;
+    req.* = .{ .conn = app.ctx.conn, .cursor = cursor };
+    app.ctx.eng.postMainTask(runSetCursor, req);
+}
+
+fn runSetCursor(user_data: ?*anyopaque) void {
+    const req: *CursorRequest = @ptrCast(@alignCast(user_data.?));
+    defer std.heap.c_allocator.destroy(req);
+    req.conn.setCursor(req.cursor);
+}
+
 /// The compositor has something for us. `dispatch` reads and dispatches it;
 /// the fd was reported readable, so the wait inside it returns at once.
 fn onDisplayReadable(loop: *ev.Loop, completion: *ev.Completion) void {
@@ -725,6 +744,13 @@ pub fn main(init: std.process.Init) !void {
         .close = onCloseWindow,
     };
     app.channels.windows = &wm;
+
+    var mc = mouse_cursor.MouseCursor{
+        .eng = eng,
+        .user_data = &app,
+        .set = onSetCursor,
+    };
+    app.channels.mouse_cursor = &mc;
 
     eng.sendWindowMetricsForView(0, first_view.win.width, first_view.win.height, first_view.win.pixel_ratio);
     // Without this the engine has no display at all and falls back for the
