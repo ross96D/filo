@@ -1,5 +1,11 @@
 // ignore_for_file: unused_field
 
+import 'dart:ui' show Offset, Size;
+
+import 'package:flutter/rendering.dart' show BoxConstraints;
+
+import 'positioner.dart';
+
 /// The kind of native window a controller owns.
 enum FiloWindowKind { toplevel, popup }
 
@@ -199,4 +205,121 @@ class FiloPositionerConstrainsAdjustmentsFlags {
 
   /// Vertically resize the surface
   static const resizeY = FiloPositionerConstrainsAdjustmentsFlags(32);
+}
+
+/// One `createWindow` request.
+class FiloWindowRequest {
+  const FiloWindowRequest({
+    required this.kind,
+    this.size,
+    this.constraints,
+    this.resizable = true,
+    this.sizedToContent = false,
+    this.modal = false,
+    this.decorated = true,
+    this.title,
+    this.parentViewId = -1,
+    this.preferredViewId = -1,
+    this.positioner,
+  });
+
+  /// The xdg-shell role to create.
+  final FiloWindowKind kind;
+
+  /// Preferred content size. Null or zero means "size to content".
+  final Size? size;
+
+  /// Size constraints, or null for unconstrained.
+  final BoxConstraints? constraints;
+
+  /// Whether the user may resize the window.
+  final bool resizable;
+
+  /// Whether the window should track its content size.
+  final bool sizedToContent;
+
+  /// Whether a dialog is modal to [parentViewId].
+  final bool modal;
+
+  /// Whether the window has decorations.
+  final bool decorated;
+
+  /// Initial title, if any.
+  final String? title;
+
+  /// Parent view id, or -1 for none. 0 is the implicit view.
+  final int parentViewId;
+
+  /// Suggested view id to adopt, or -1 for no preference.
+  final int preferredViewId;
+
+  /// Popup positioner, including its anchor rect and size.
+  final FiloPositioner? positioner;
+}
+
+/// The initial state of a created window.
+class FiloWindowHandle {
+  const FiloWindowHandle({
+    required this.viewId,
+    required this.contentSize,
+    required this.toplevelState,
+    required this.wmCapabilities,
+    required this.offsetFromParent,
+    this.title,
+  });
+
+  final int viewId;
+  final Size contentSize;
+  final Set<FiloToplevelState> toplevelState;
+  final Set<FiloToplevelWMCapabilities> wmCapabilities;
+  final Offset offsetFromParent;
+  final String? title;
+}
+
+/// An event the backend delivers for a window.
+sealed class FiloWindowEvent {
+  const FiloWindowEvent(this.viewId);
+
+  final int viewId;
+}
+
+/// The compositor or user asked the window to close.
+///
+/// The window is still alive; the controller's delegate decides whether to
+/// destroy it.
+final class FiloWindowCloseRequested extends FiloWindowEvent {
+  const FiloWindowCloseRequested(super.viewId);
+}
+
+/// The native window and its Flutter view are gone.
+final class FiloWindowDestroyed extends FiloWindowEvent {
+  const FiloWindowDestroyed(super.viewId);
+}
+
+/// Some window state changed. Fields that are null did not change.
+final class FiloWindowStateChanged extends FiloWindowEvent {
+  const FiloWindowStateChanged(
+    super.viewId, {
+    this.title,
+    this.toplevelState,
+    this.wmCapabilities,
+    this.contentSize,
+    this.offsetFromParent,
+  });
+
+  final String? title;
+  final Set<FiloToplevelState>? toplevelState;
+  final Set<FiloToplevelWMCapabilities>? wmCapabilities;
+  final Size? contentSize;
+  final Offset? offsetFromParent;
+}
+
+/// A backend operation failed.
+class FiloWindowingException implements Exception {
+  const FiloWindowingException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'FiloWindowingException: $message';
 }

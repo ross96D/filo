@@ -103,6 +103,8 @@ const App = struct {
     /// the whole engine. Null only before the engine and loop exist.
     frame_clock: ?*frame_clock.FrameClock = null,
     next_view_id: engine.ViewId = 1,
+    /// Whether a windowing controller has adopted the implicit view (id 0).
+    implicit_adopted: bool = false,
     /// Whether `ctx` has been filled in. `deinitViews` also runs after a failed
     /// engine initialization, before the context exists.
     ctx_ready: bool = false,
@@ -189,6 +191,34 @@ const App = struct {
 
     /// Create a toplevel from a windowing request and apply its properties.
     fn createToplevel(self: *App, req: *const windowing.WindowRequest) !*View {
+        // The first regular window may adopt the implicit view (id 0), which
+        // `main` already created and added.
+        if (req.preferred_view_id == 0 and !self.implicit_adopted) {
+            if (self.viewForId(0)) |view| {
+                self.implicit_adopted = true;
+                if (req.title) |title| {
+                    view.win.setTitle(title);
+                    view.setViewTitleZ(req.title);
+                }
+                if (req.resizable == 0) {
+                    const fixed = if (req.size.width > 0 and req.size.height > 0)
+                        windowing.Size{ .width = req.size.width, .height = req.size.height }
+                    else
+                        windowing.Size{ .width = view.win.width, .height = view.win.height };
+                    view.win.setMinSize(fixed);
+                    view.win.setMaxSize(fixed);
+                } else {
+                    view.win.setMinSize(req.min_size);
+                    view.win.setMaxSize(req.max_size);
+                }
+                view.win.commit();
+                view.win.resized = false;
+                view.win.state_dirty = false;
+                view.win.capabilities_dirty = false;
+                return view;
+            }
+        }
+
         const width: u32 = if (req.size.width > 0) @min(req.size.width, 16_384) else 800;
         const height: u32 = if (req.size.height > 0) @min(req.size.height, 16_384) else 600;
 
@@ -456,15 +486,17 @@ const App = struct {
             },
         };
 
-        beginAddViewSync(app, view) catch |err| {
-            std.debug.print("fembed: windowing create: AddView failed: {}\n", .{err});
-            if (err == error.AddViewNotSynchronous) {
-                @panic("Multiwindow feature needs the dart code and the embedder code to run in the same thread");
-            } else {
-                app.destroyView(view);
-            }
-            return .backend_failed;
-        };
+        if (!view.added) {
+            beginAddViewSync(app, view) catch |err| {
+                std.debug.print("fembed: windowing create: AddView failed: {}\n", .{err});
+                if (err == error.AddViewNotSynchronous) {
+                    @panic("Multiwindow feature needs the dart code and the embedder code to run in the same thread");
+                } else {
+                    app.destroyView(view);
+                }
+                return .backend_failed;
+            };
+        }
 
         out.view_id = view.id;
         out.content_size = .{
@@ -488,12 +520,12 @@ const App = struct {
     fn bridgeObserve(
         ctx: ?*anyopaque,
         view_id: i64,
-        callbacks: *const windowing.WindowCallbacks,
+        callbacks: windowing.WindowCallbacks,
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         if (!app.ctx_ready) return .backend_failed;
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        view.callbacks = callbacks.*;
+        view.callbacks = callbacks;
         return .ok;
     }
 
@@ -821,6 +853,7 @@ fn runWindowingSpike(self: *App) void {
     request.resizable = 1;
     request.decorated = 1;
     request.title = "fembed windowing spike";
+    request.preferred_view_id = -1;
 
     var handle = std.mem.zeroes(windowing.WindowHandle);
     const result = windowing.filo_window_create(&request, &handle);
@@ -831,13 +864,16 @@ fn runWindowingSpike(self: *App) void {
     );
     if (result != 0) return;
 
-    var callbacks = windowing.empty_callbacks;
-    callbacks.on_configure = spikeOnConfigure;
-    callbacks.on_state = spikeOnState;
-    callbacks.on_capabilities = spikeOnCapabilities;
-    callbacks.on_moved = spikeOnMoved;
-    callbacks.on_close = spikeOnClose;
-    _ = windowing.filo_window_observe(handle.view_id, &callbacks);
+    _ = windowing.filo_window_observe(
+        handle.view_id,
+        spikeOnConfigure,
+        spikeOnState,
+        spikeOnCapabilities,
+        null,
+        spikeOnMoved,
+        spikeOnClose,
+        null,
+    );
 
     _ = windowing.filo_window_set_title(handle.view_id, "fembed windowing spike");
     _ = windowing.filo_window_set_constraints(handle.view_id, 320, 240, 1920, 1080);
@@ -882,7 +918,16 @@ fn runWindowingSpike(self: *App) void {
     );
 
     if (popup_result == 0) {
-        _ = windowing.filo_window_observe(popup_handle.view_id, &callbacks);
+        _ = windowing.filo_window_observe(
+            popup_handle.view_id,
+            spikeOnConfigure,
+            spikeOnState,
+            spikeOnCapabilities,
+            null,
+            spikeOnMoved,
+            spikeOnClose,
+            null,
+        );
         _ = windowing.filo_window_update_position(
             popup_handle.view_id,
             null,

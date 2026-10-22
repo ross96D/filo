@@ -4,9 +4,10 @@ A Flutter `WindowingOwner` implementation for the **Filo** custom embedder.
 
 This package adapts Flutter's experimental windowing API (Flutter 3.47,
 `RegularWindowController` and friends) to an embedder that can create native
-windows and Flutter views **synchronously**. The embedder supplies a
-`FiloWindowingBackend`; this package owns the framework-side controllers,
-state, delegates, and events.
+windows and Flutter views **synchronously**. It ships a native backend for the
+Filo embedder's `filo_window_*` C ABI and owns the framework-side controllers,
+state, delegates, and events. A different embedder can inject its own
+`FiloWindowingBackend`.
 
 > **Experimental.** Flutter's windowing API is marked `@internal`, lives in
 > `package:flutter/src/widgets/_window.dart`, and can change in any Flutter
@@ -29,7 +30,7 @@ directly, which is appropriate for a custom embedder that owns the platform.
 import 'package:filo_windowing/filo_windowing.dart';
 
 void main() {
-  final owner = installFiloWindowing(backend: myBackend);
+  installFiloWindowing(); // defaults to the native filo_window_* backend
   runWidget(/* ... */);
 }
 ```
@@ -69,18 +70,22 @@ renders into the implicit view separately.
 
 ## Window types
 
-All five framework controller types are implemented:
+The regular, dialog, tooltip, and popup controller types are implemented:
 
 - `RegularWindowController`
 - `DialogWindowController`
 - `TooltipWindowController`
 - `PopupWindowController`
-- `SatelliteWindowController`
+
+Satellite windows are rejected with `UnimplementedError`: core xdg-shell gives
+a client no way to position or move an `xdg_toplevel`, so the satellite contract
+(initial positioner, relative offset tracking, reparenting without moving)
+cannot be honoured on Wayland.
 
 The backend is responsible for the native archetypes: top-level windows,
-dialogs, popups, tooltips, and satellites. Sizes, constraint adjustments, and
-anchor rectangles are passed through as package-owned values, so a backend does
-not need to import Flutter's private windowing types.
+dialogs, popups, and tooltips. Sizes, constraint adjustments, and anchor
+rectangles are passed through as package-owned values, so a backend does not
+need to import Flutter's private windowing types.
 
 ## Backend contract
 
@@ -94,8 +99,18 @@ See [doc/backend.md](doc/backend.md) for the full contract. In short:
 - The backend must emit `FiloWindowDestroyed` for requested and external
   destruction.
 
-A fake backend and fake views live under `test/support/` and can be used as a
-reference for implementing the real bridge.
+A fake backend lives under `test/support/` and can be used as a reference for
+implementing another bridge.
+
+## Native backend
+
+`FiloNativeBackend` binds the `filo_window_*` symbols the Filo embedder exports
+from its process image. The embedder must link with its dynamic symbols exported
+(`rdynamic` in the Zig build). `installFiloWindowing()` uses it by default; pass
+`backend:` to install a different implementation.
+
+The repository's `windowing_demo/` is a small app that runs the package against
+the embedder.
 
 ## API
 

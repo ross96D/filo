@@ -149,7 +149,7 @@ pub const Host = struct {
     pub const VTable = struct {
         create: *const fn (ctx: ?*anyopaque, request: *const WindowRequest, out: *WindowHandle) Status,
         destroy: *const fn (ctx: ?*anyopaque, view_id: i64) void,
-        observe: *const fn (ctx: ?*anyopaque, view_id: i64, callbacks: *const WindowCallbacks) Status,
+        observe: *const fn (ctx: ?*anyopaque, view_id: i64, callbacks: WindowCallbacks) Status,
 
         set_title: *const fn (ctx: ?*anyopaque, view_id: i64, title: ?[*:0]const u8) Status,
         set_size: *const fn (ctx: ?*anyopaque, view_id: i64, size: Size) Status,
@@ -176,7 +176,7 @@ pub const Host = struct {
         return self.vtable.destroy(self.ctx, view_id);
     }
 
-    pub fn observe(self: Host, view_id: i64, callbacks: *const WindowCallbacks) Status {
+    pub fn observe(self: Host, view_id: i64, callbacks: WindowCallbacks) Status {
         return self.vtable.observe(self.ctx, view_id, callbacks);
     }
 
@@ -264,9 +264,25 @@ pub export fn filo_window_destroy(view_id: i64) i32 {
     return @backingInt(Status.ok);
 }
 
-pub export fn filo_window_observe(view_id: i64, callbacks: ?*const WindowCallbacks) i32 {
-    const cbs = callbacks orelse return @backingInt(Status.invalid_argument);
-    return @backingInt(host.observe(view_id, cbs));
+pub export fn filo_window_observe(
+    view_id: i64,
+    on_configure: ?ConfigureFn,
+    on_state: ?StateFn,
+    on_capabilities: ?CapabilitiesFn,
+    on_title: ?TitleFn,
+    on_moved: ?MovedFn,
+    on_close: ?NotifyFn,
+    on_destroy: ?NotifyFn,
+) i32 {
+    return @backingInt(host.observe(view_id, .{
+        .on_capabilities = on_capabilities,
+        .on_close = on_close,
+        .on_configure = on_configure,
+        .on_destroy = on_destroy,
+        .on_moved = on_moved,
+        .on_state = on_state,
+        .on_title = on_title,
+    }));
 }
 
 pub export fn filo_window_set_title(view_id: i64, title: ?[*:0]const u8) i32 {

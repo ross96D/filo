@@ -1,317 +1,262 @@
-import 'dart:ui' show Display, Offset, Rect, Size;
-import 'dart:ffi' as ffi;
+// ignore_for_file: implementation_imports, invalid_use_of_internal_member
 
-import 'package:filo_windowing/src/_window_observer.dart';
+import 'dart:ui' show Display, FlutterView, Offset, Rect, Size;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart' show BoxConstraints;
 import 'package:flutter/src/widgets/_window.dart';
 import 'package:flutter/src/widgets/_window_positioner.dart';
 
-import 'controller_common.dart';
+import 'backend.dart';
+import 'models.dart';
+
+/// Shared state and behaviour for controllers backed by a
+/// [FiloWindowingBackend].
+mixin FiloWindowControllerMixin on ChangeNotifier {
+  late final FiloWindowingBackend _backend;
+  late final int _viewId;
+  bool _destroyed = false;
+  bool _destroyRequested = false;
+
+  /// Called by the concrete controller once, from its constructor.
+  void initWindow({
+    required FiloWindowingBackend backend,
+    required FiloWindowHandle handle,
+  }) {
+    _backend = backend;
+    _viewId = handle.viewId;
+  }
+
+  FiloWindowingBackend get backend => _backend;
+
+  int get viewId => _viewId;
+
+  bool get isDestroyed => _destroyed;
+
+  Size get windowContentSize =>
+      _destroyed ? Size.zero : _backend.getSize(_viewId);
+
+  String get windowTitle => _destroyed ? '' : _backend.getTitle(_viewId);
+
+  Set<FiloToplevelState> get windowState =>
+      _destroyed ? const <FiloToplevelState>{} : _backend.getState(_viewId);
+
+  Set<FiloToplevelWMCapabilities> get windowCapabilities => _destroyed
+      ? const <FiloToplevelWMCapabilities>{}
+      : _backend.getCapabilities(_viewId);
+
+  Offset get windowOffset =>
+      _destroyed ? Offset.zero : _backend.getOffset(_viewId);
+
+  Size get contentSize => windowContentSize;
+
+  void destroy() {
+    if (_destroyed || _destroyRequested) return;
+    _destroyRequested = true;
+    _backend.destroyWindow(_viewId);
+  }
+
+  void setConstraints(BoxConstraints constraints) {
+    if (_destroyed) return;
+    _backend.setConstraints(_viewId, constraints);
+  }
+
+  /// The owner calls this when the backend reports a state change.
+  void handleStateChanged() {
+    if (!_destroyed) notifyListeners();
+  }
+
+  /// The owner calls this when the backend reports the window is gone.
+  void handleDestroyed() {
+    if (_destroyed) return;
+    _destroyed = true;
+    _destroyRequested = true;
+    notifyListeners();
+  }
+}
+
+/// Adds the popup/tooltip repositioning API.
+mixin FiloPositionedWindowControllerMixin on FiloWindowControllerMixin {
+  void updatePosition({Rect? anchorRect, WindowPositioner? positioner}) {
+    if (isDestroyed) return;
+    backend.updatePosition(
+      viewId,
+      anchorRect: anchorRect,
+      positioner: positioner,
+    );
+  }
+
+  Offset get offsetFromParent => windowOffset;
+}
 
 /// A regular top-level window backed by the Filo embedder.
 class FiloRegularWindowController extends RegularWindowController
-    implements FiloWindowControllerCommon {
-  @override
-  ffi.Pointer<ffi.Void> get handle => throw UnimplementedError();
-
-  @override
-  late FiloWindowObserver observer = throw UnimplementedError();
-
-  /// The delegate that receives this window's lifecycle callbacks.
-  // final RegularWindowControllerDelegate delegate;
+    with FiloWindowControllerMixin {
   FiloRegularWindowController({
+    required FiloWindowingBackend backend,
     required RegularWindowControllerDelegate delegate,
-    Size? size,
-    BoxConstraints? constraints,
-    String? title,
-    required bool resizable,
-  }) : super.empty();
+    required FiloWindowHandle handle,
+    required FlutterView view,
+  }) : _delegate = delegate,
+       super.empty() {
+    initWindow(backend: backend, handle: handle);
+    rootView = view;
+  }
+
+  final RegularWindowControllerDelegate _delegate;
+
+  RegularWindowControllerDelegate get delegate => _delegate;
+
+  @override
+  String get title => windowTitle;
+
+  @override
+  bool get isActivated =>
+      windowState.contains(FiloToplevelState.activated);
+
+  @override
+  bool get isMaximized =>
+      windowState.contains(FiloToplevelState.maximized);
+
+  @override
+  bool get isMinimized => false;
+
+  @override
+  bool get isFullscreen =>
+      windowState.contains(FiloToplevelState.fullscreen);
+
+  @override
+  void setSize(Size size) {
+    if (!isDestroyed) backend.setSize(viewId, size);
+  }
+
+  @override
+  void setTitle(String title) {
+    if (isDestroyed) return;
+    backend.setTitle(viewId, title);
+    notifyListeners();
+  }
 
   @override
   void activate() {
-    // TODO: implement activate
-  }
-
-  @override
-  // TODO: implement contentSize
-  Size get contentSize => throw UnimplementedError();
-
-  @override
-  void destroy() {
-    // TODO: implement destroy
-  }
-
-  @override
-  // TODO: implement isActivated
-  bool get isActivated => throw UnimplementedError();
-
-  @override
-  // TODO: implement isFullscreen
-  bool get isFullscreen => throw UnimplementedError();
-
-  @override
-  // TODO: implement isMaximized
-  bool get isMaximized => throw UnimplementedError();
-
-  @override
-  // TODO: implement isMinimized
-  bool get isMinimized => throw UnimplementedError();
-
-  @override
-  void setConstraints(BoxConstraints constraints) {
-    // TODO: implement setConstraints
-  }
-
-  @override
-  void setFullscreen(bool fullscreen, {Display? display}) {
-    // TODO: implement setFullscreen
+    if (!isDestroyed) backend.activate(viewId);
   }
 
   @override
   void setMaximized(bool maximized) {
-    // TODO: implement setMaximized
+    if (!isDestroyed) backend.setMaximized(viewId, maximized);
   }
 
   @override
   void setMinimized(bool minimized) {
-    // TODO: implement setMinimized
+    if (!isDestroyed) backend.setMinimized(viewId, minimized);
   }
 
   @override
-  void setSize(Size size) {
-    // TODO: implement setSize
+  void setFullscreen(bool fullscreen, {Display? display}) {
+    if (!isDestroyed) {
+      backend.setFullscreen(viewId, fullscreen, display: display);
+    }
   }
-
-  @override
-  void setTitle(String title) {
-    // TODO: implement setTitle
-  }
-
-  @override
-  // TODO: implement title
-  String get title => throw UnimplementedError();
 }
 
 /// A dialog window backed by the Filo embedder.
 class FiloDialogWindowController extends DialogWindowController
-    implements FiloWindowControllerCommon {
-  final DialogWindowControllerDelegate delegate;
+    with FiloWindowControllerMixin {
+  FiloDialogWindowController({
+    required FiloWindowingBackend backend,
+    required DialogWindowControllerDelegate delegate,
+    required this.parent,
+    required FiloWindowHandle handle,
+    required FlutterView view,
+  }) : _delegate = delegate,
+       super.empty() {
+    initWindow(backend: backend, handle: handle);
+    rootView = view;
+  }
 
-  @override
-  ffi.Pointer<ffi.Void> get handle => throw UnimplementedError();
-
-  @override
-  late FiloWindowObserver observer = throw UnimplementedError();
+  final DialogWindowControllerDelegate _delegate;
 
   @override
   final BaseWindowController? parent;
 
-  FiloDialogWindowController({
-    required this.delegate,
-    this.parent,
-    Size? size,
-    BoxConstraints? constraints,
-    required bool resizable,
-    String? title,
-  }) : super.empty();
+  DialogWindowControllerDelegate get delegate => _delegate;
 
   @override
-  void activate() {}
+  String get title => windowTitle;
 
   @override
-  // TODO: implement contentSize
-  Size get contentSize => throw UnimplementedError();
+  bool get isActivated =>
+      windowState.contains(FiloToplevelState.activated);
 
   @override
-  void destroy() {
-    // TODO: implement destroy
+  bool get isMinimized => false;
+
+  @override
+  void setSize(Size size) {
+    if (!isDestroyed) backend.setSize(viewId, size);
   }
 
   @override
-  // TODO: implement isActivated
-  bool get isActivated => throw UnimplementedError();
+  void setTitle(String title) {
+    if (isDestroyed) return;
+    backend.setTitle(viewId, title);
+    notifyListeners();
+  }
 
   @override
-  // TODO: implement isMinimized
-  bool get isMinimized => throw UnimplementedError();
-
-  @override
-  void setConstraints(BoxConstraints constraints) {
-    // TODO: implement setConstraints
+  void activate() {
+    if (!isDestroyed) backend.activate(viewId);
   }
 
   @override
   void setMinimized(bool minimized) {
-    // TODO: implement setMinimized
+    if (!isDestroyed) backend.setMinimized(viewId, minimized);
   }
-
-  @override
-  void setSize(Size size) {
-    // TODO: implement setSize
-  }
-
-  @override
-  void setTitle(String title) {
-    // TODO: implement setTitle
-  }
-
-  @override
-  // TODO: implement title
-  String get title => throw UnimplementedError();
 }
 
 /// A tooltip window backed by the Filo embedder.
 class FiloTooltipWindowController extends TooltipWindowController
-    implements FiloWindowControllerCommon {
-  final TooltipWindowControllerDelegate delegate;
+    with FiloWindowControllerMixin, FiloPositionedWindowControllerMixin {
+  FiloTooltipWindowController({
+    required FiloWindowingBackend backend,
+    required TooltipWindowControllerDelegate delegate,
+    required this.parent,
+    required FiloWindowHandle handle,
+    required FlutterView view,
+  }) : _delegate = delegate,
+       super.empty() {
+    initWindow(backend: backend, handle: handle);
+    rootView = view;
+  }
 
-  @override
-  ffi.Pointer<ffi.Void> get handle => throw UnimplementedError();
-
-  @override
-  late FiloWindowObserver observer = throw UnimplementedError();
+  final TooltipWindowControllerDelegate _delegate;
 
   @override
   final BaseWindowController parent;
 
-  FiloTooltipWindowController({
-    required this.delegate,
-    required this.parent,
-    required BoxConstraints constraints,
-    required Rect anchorRect,
-    required WindowPositioner positioner,
-  }) : super.empty();
-
-  @override
-  // TODO: implement contentSize
-  Size get contentSize => throw UnimplementedError();
-
-  @override
-  void destroy() {
-    // TODO: implement destroy
-  }
-
-  @override
-  void setConstraints(BoxConstraints constraints) {
-    // TODO: implement setConstraints
-  }
-
-  @override
-  void updatePosition({Rect? anchorRect, WindowPositioner? positioner}) {
-    // TODO: implement updatePosition
-  }
+  TooltipWindowControllerDelegate get delegate => _delegate;
 }
 
 /// A popup window backed by the Filo embedder.
 class FiloPopupWindowController extends PopupWindowController
-    implements FiloWindowControllerCommon {
-  final PopupWindowControllerDelegate delegate;
-
-  @override
-  ffi.Pointer<ffi.Void> get handle => throw UnimplementedError();
-
-  @override
-  late FiloWindowObserver observer = throw UnimplementedError();
-
-  @override
-  final BaseWindowController parent;
-
+    with FiloWindowControllerMixin, FiloPositionedWindowControllerMixin {
   FiloPopupWindowController({
-    required this.delegate,
+    required FiloWindowingBackend backend,
+    required PopupWindowControllerDelegate delegate,
     required this.parent,
-    required BoxConstraints constraints,
-    required Rect anchorRect,
-    required WindowPositioner positioner,
-  }) : super.empty();
-
-  @override
-  // TODO: implement contentSize
-  Size get contentSize => throw UnimplementedError();
-
-  @override
-  void destroy() {
-    // TODO: implement destroy
+    required FiloWindowHandle handle,
+    required FlutterView view,
+  }) : _delegate = delegate,
+       super.empty() {
+    initWindow(backend: backend, handle: handle);
+    rootView = view;
   }
 
-  @override
-  // TODO: implement offsetFromParent
-  Offset get offsetFromParent => throw UnimplementedError();
-
-  @override
-  void setConstraints(BoxConstraints constraints) {
-    // TODO: implement setConstraints
-  }
-
-  @override
-  void updatePosition({Rect? anchorRect, WindowPositioner? positioner}) {
-    // TODO: implement updatePosition
-  }
-}
-
-/// A satellite window backed by the Filo embedder.
-class FiloSatelliteWindowController extends SatelliteWindowController
-    implements FiloWindowControllerCommon {
-  final SatelliteWindowControllerDelegate delegate;
-
-  @override
-  ffi.Pointer<ffi.Void> get handle => throw UnimplementedError();
-
-  @override
-  late FiloWindowObserver observer = throw UnimplementedError();
+  final PopupWindowControllerDelegate _delegate;
 
   @override
   final BaseWindowController parent;
 
-  FiloSatelliteWindowController({
-    required this.delegate,
-    required this.parent,
-    required WindowPositioner initialPositioner,
-    Rect? initialAnchorRect,
-    Size? size,
-    BoxConstraints? constraints,
-    required bool resizable,
-    String? title,
-  }) : super.empty();
-
-  @override
-  void activate() {
-    // TODO: implement activate
-  }
-
-  @override
-  // TODO: implement contentSize
-  Size get contentSize => throw UnimplementedError();
-
-  @override
-  void destroy() {
-    // TODO: implement destroy
-  }
-
-  @override
-  // TODO: implement isActivated
-  bool get isActivated => throw UnimplementedError();
-
-  @override
-  void setConstraints(BoxConstraints constraints) {
-    // TODO: implement setConstraints
-  }
-
-  @override
-  void setParent(BaseWindowController parent) {
-    // TODO: implement setParent
-  }
-
-  @override
-  void setSize(Size size) {
-    // TODO: implement setSize
-  }
-
-  @override
-  void setTitle(String title) {
-    // TODO: implement setTitle
-  }
-
-  @override
-  // TODO: implement title
-  String get title => throw UnimplementedError();
+  PopupWindowControllerDelegate get delegate => _delegate;
 }

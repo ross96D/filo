@@ -72,4 +72,23 @@ class FiloPositioner {
     this.gravity,
     this.offset,
   });
+
+  /// Copy this positioner with some fields replaced.
+  FiloPositioner copyWith({
+    FiloSize? size,
+    FiloRect? anchorRect,
+    FiloPositionerAnchor? anchor,
+    FiloPositionerGravity? gravity,
+    FiloPositionerConstrainsAdjustmentsFlags? constrainsAdjustments,
+    FiloOffset? offset,
+  }) {
+    return FiloPositioner(
+      size: size ?? this.size,
+      anchorRect: anchorRect ?? this.anchorRect,
+      anchor: anchor ?? this.anchor,
+      gravity: gravity ?? this.gravity,
+      constrainsAdjustments: constrainsAdjustments ?? this.constrainsAdjustments,
+      offset: offset ?? this.offset,
+    );
+  }
 }
