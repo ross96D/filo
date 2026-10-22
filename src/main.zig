@@ -26,7 +26,6 @@ const View = struct {
     id: engine.ViewId,
     win: *window.Window,
     surface: vulkan.Surface,
-    frame: *frame_clock.FrameClock,
     /// The engine has confirmed that the view exists.
     added: bool = false,
     /// A close was requested while the engine was still adding the view.
@@ -49,9 +48,9 @@ const App = struct {
     views: std.ArrayListUnmanaged(*View) = .empty,
     views_by_id: std.AutoHashMapUnmanaged(engine.ViewId, *View) = .empty,
     views_by_surface: std.AutoHashMapUnmanaged(*wl.Surface, *View) = .empty,
-    /// The view whose frame clock drives the engine's vsync. The engine renders
-    /// every view in one frame, so one clock is the display's refresh source.
-    primary: ?*View = null,
+    /// The one frame clock: it owns a callback per surface and fires vsync for
+    /// the whole engine. Null only before the engine and loop exist.
+    frame_clock: ?*frame_clock.FrameClock = null,
     next_view_id: engine.ViewId = 1,
     /// Whether `ctx` has been filled in. `deinitViews` also runs after a failed
     /// engine initialization, before the context exists.
@@ -78,8 +77,9 @@ const App = struct {
         return id;
     }
 
-    /// Create the surface, frame clock and bookkeeping for a window. The window
-    /// is owned by the view on success and by the caller on failure.
+    /// Create the surface and bookkeeping for a window, and register its Wayland
+    /// surface with the shared frame clock. The window is owned by the view on
+    /// success and by the caller on failure.
     fn adoptView(self: *App, id: engine.ViewId, win: *window.Window) !*View {
         var surface = try vulkan.Surface.create(
             self.vk,
@@ -90,17 +90,16 @@ const App = struct {
         );
         errdefer surface.destroy();
 
-        const frame = try frame_clock.FrameClock.init(&self.ctx, win.surface, self.ctx.conn.frame_period_ns);
-        errdefer frame.deinit();
-
         const view = try self.ctx.allocator.create(View);
         errdefer self.ctx.allocator.destroy(view);
         view.* = .{
             .id = id,
             .win = win,
             .surface = surface,
-            .frame = frame,
         };
+
+        try self.frame_clock.?.addSurface(win.surface);
+        errdefer self.frame_clock.?.removeSurface(win.surface);
 
         try self.views.append(self.ctx.allocator, view);
         errdefer _ = self.views.pop();
@@ -181,10 +180,9 @@ const App = struct {
                 break;
             }
         }
-        if (self.primary == view) self.primary = null;
+        if (self.frame_clock) |clock| clock.removeSurface(view.win.surface);
 
         view.surface.destroy();
-        view.frame.deinit();
         view.win.destroy(self.ctx.allocator);
         self.ctx.allocator.destroy(view);
     }
@@ -192,9 +190,11 @@ const App = struct {
     fn deinitViews(self: *App) void {
         if (!self.ctx_ready) return;
 
+        // Drop the frame clock's callbacks before the surfaces they watch.
+        if (self.frame_clock) |clock| clock.deinit();
+
         for (self.views.items) |view| {
             view.surface.destroy();
-            view.frame.deinit();
             view.win.destroy(self.ctx.allocator);
             self.ctx.allocator.destroy(view);
         }
@@ -615,14 +615,10 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
         if (view.added) view.win.applyResize(self.ctx.eng, view.id);
     }
 
-    // The engine renders every view in one frame, so the primary window's
-    // surface is the refresh source for all of them.
     self.ctx.eng.frame_period_ns = self.ctx.conn.frame_period_ns;
-    if (self.primary) |primary| {
-        if (self.views_by_id.contains(primary.id)) {
-            primary.frame.setPeriod(self.ctx.conn.frame_period_ns);
-            primary.frame.service();
-        }
+    if (self.frame_clock) |clock| {
+        clock.setPeriod(self.ctx.conn.frame_period_ns);
+        clock.service();
     }
     self.ctx.conn.flush();
 }
@@ -701,11 +697,11 @@ pub fn main(init: std.process.Init) !void {
 
     // The globals are only complete once the engine exists.
     app.ctx = .{ .allocator = allocator, .loop = &loop, .conn = conn, .eng = eng };
+    app.frame_clock = try frame_clock.FrameClock.init(&app.ctx, conn.frame_period_ns);
     app.ctx_ready = true;
 
     const first_view = try app.adoptView(0, first_win);
     first_view.added = true;
-    app.primary = first_view;
     first_win_owned = false;
 
     var ti = text_input.TextInput.init(allocator, eng);

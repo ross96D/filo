@@ -8,21 +8,29 @@ const wl = wayland.client.wl;
 
 const Context = @import("../context.zig").Context;
 
-/// The frame clock for one surface: it answers the engine's vsync requests from
-/// the compositor's `wl_surface.frame` callbacks, and hands the engine a tick
-/// from its own clock when the compositor does not repaint within two refresh
-/// periods (niri, for one, does not paint a surface nobody can see).
+/// The one frame clock for the whole engine. It answers the engine's vsync
+/// requests from `wl_surface.frame` callbacks on *every* surface, and hands the
+/// engine a tick from its own clock when no surface has been repainted within
+/// two refresh periods.
+///
+/// The compositor repaints all its visible surfaces in one scanout and flushes
+/// their `done` events in one write, so one `wl_display.dispatch` carries one
+/// frame's worth of callbacks. `service` runs once after that dispatch and fires
+/// a *single* vsync — the callback on any visible surface sets the pace, hidden
+/// surfaces stay silent, and the shared tick coalesces the rest.
 pub const FrameClock = struct {
     ctx: *Context,
-    surface: *wl.Surface,
     period_ns: u64,
 
-    /// The frame callback we are waiting on, or null when none is armed.
-    callback: ?*wl.Callback = null,
-    /// When the callback above was armed, to notice a repaint that never comes.
-    armed_at_ns: u64 = 0,
-    /// A compositor tick that arrived with no frame waiting for it.
+    /// One armed callback per surface. A hidden surface never fires (the
+    /// compositor does not repaint it); it just sits armed until it reappears
+    /// and its next commit is composited.
+    surfaces: std.ArrayListUnmanaged(Entry) = .empty,
+
+    /// The freshest repaint any surface reported, cached until `service` fires
+    /// it. Overwritten on every callback so a stale frame is dropped, not fired.
     tick: ?VsyncTimes = null,
+
     /// Whether the first tick has been answered from our own clock, which is all
     /// it takes to get the first frame on screen.
     bootstrapped: bool = false,
@@ -30,27 +38,25 @@ pub const FrameClock = struct {
     timer: ev.Timer = .init(.none),
     timer_armed: bool = false,
 
-    pub fn init(ctx: *Context, surface: *wl.Surface, period_ns: u64) !*FrameClock {
+    const Entry = struct {
+        surface: *wl.Surface,
+        callback: ?*wl.Callback = null,
+    };
+
+    pub fn init(ctx: *Context, period_ns: u64) !*FrameClock {
         const self = try ctx.allocator.create(FrameClock);
-        self.* = .{
-            .ctx = ctx,
-            .surface = surface,
-            .period_ns = period_ns,
-        };
+        self.* = .{ .ctx = ctx, .period_ns = period_ns };
         self.timer.c.userdata = self;
         self.timer.c.callback = onTimeout;
         return self;
     }
 
     pub fn deinit(self: *FrameClock) void {
-        // The loop may still hold the timer completion, and the surface may
-        // still have a frame callback armed. Drop both before the clock (and
-        // eventually the surface) goes away.
         self.clearTimer();
-        if (self.callback) |callback| {
-            callback.destroy();
-            self.callback = null;
+        for (self.surfaces.items) |entry| {
+            if (entry.callback) |cb| cb.destroy();
         }
+        self.surfaces.deinit(self.ctx.allocator);
         self.ctx.allocator.destroy(self);
     }
 
@@ -58,29 +64,43 @@ pub const FrameClock = struct {
         self.period_ns = period_ns;
     }
 
+    /// Listen to a surface. Its callback is armed lazily by `service`.
+    pub fn addSurface(self: *FrameClock, surface: *wl.Surface) !void {
+        try self.surfaces.append(self.ctx.allocator, .{ .surface = surface });
+    }
+
+    /// Stop listening to a surface and drop its in-flight callback. Call before
+    /// the surface itself is destroyed.
+    pub fn removeSurface(self: *FrameClock, surface: *wl.Surface) void {
+        for (self.surfaces.items, 0..) |entry, i| {
+            if (entry.surface == surface) {
+                if (entry.callback) |cb| cb.destroy();
+                _ = self.surfaces.swapRemove(i);
+                return;
+            }
+        }
+    }
+
     /// Answer the engine when it is waiting for the display's next refresh.
+    /// Called once after every dispatch (and platform wake).
     pub fn service(self: *FrameClock) void {
+        // Keep a callback armed on every surface so a repaint on any of them is
+        // reported. Idempotent; also picks up newly added surfaces.
+        for (self.surfaces.items) |*entry| self.arm(entry);
+
         if (!self.ctx.eng.hasVsyncRequests()) return;
 
-        // A tick the compositor has already given us is the display's own frame
-        // clock, and the best answer there is.
+        // A repaint already happened: answer from it. This is the coalescing —
+        // all of one frame's callbacks overwrote the same tick, and we fire it
+        // exactly once here.
         if (self.tick != null) {
             self.fireTick();
             return;
         }
 
-        if (self.callback == null and !self.arm()) {
-            // No frame clock at all: keep the engine going at the nominal rate
-            // rather than stalling it every frame.
-            const now = self.ctx.eng.currentTime();
-            self.ctx.eng.fireVsync(now, now + self.period_ns);
-            return;
-        }
-
         // The first frame has not been presented yet, so the compositor has
-        // nothing to time and need not answer a frame request at all (niri does
-        // not). Answer once from our own clock so the engine draws that first
-        // frame; every tick after it comes from the compositor.
+        // nothing to time and need not answer a frame request at all. Answer
+        // once from our own clock so the engine draws that first frame.
         if (!self.bootstrapped) {
             self.bootstrapped = true;
             const now = self.ctx.eng.currentTime();
@@ -88,40 +108,23 @@ pub const FrameClock = struct {
             return;
         }
 
-        // A compositor is only obliged to answer a frame request when it paints
-        // the surface, and niri does not paint for the request alone: if the
-        // repaint that would have answered this one has already been and gone,
-        // no tick is coming. Keep the request armed for the next repaint, but
-        // hand the engine a tick from our own clock rather than stalling it.
-        if (self.ctx.eng.currentTime() -% self.armed_at_ns > 2 * self.period_ns) {
-            const now = self.ctx.eng.currentTime();
-            self.ctx.eng.fireVsync(now, now + self.period_ns);
-            return;
-        }
-
-        // The compositor still owes us a tick. It may never come, so make sure
-        // the timer that would answer the request is running.
+        // No surface has reported yet. The timer keeps us alive: it fires vsync
+        // from our own clock so the engine keeps committing, and a surface that
+        // reappears then has a live callback to report.
         self.armTimer();
     }
 
-    /// Ask the compositor for the next repaint of the surface. One is kept
-    /// armed whenever the engine might draw again, so that the request is always
-    /// on the wire before the frame it should report. False means the request
-    /// could not be made, and there is no frame clock to wait on.
-    fn arm(self: *FrameClock) bool {
-        if (self.callback != null) return true;
+    fn arm(self: *FrameClock, entry: *Entry) void {
+        if (entry.callback != null) return;
 
-        const callback = self.surface.frame() catch |err| {
+        const callback = entry.surface.frame() catch |err| {
             std.debug.print("fembed: wl_surface.frame failed: {}\n", .{err});
-            return false;
+            return;
         };
         callback.setListener(*FrameClock, onFrame, self);
-        self.callback = callback;
-        self.armed_at_ns = self.ctx.eng.currentTime();
-        return true;
+        entry.callback = callback;
     }
 
-    /// Start the timer that answers a frame request the compositor did not.
     fn armTimer(self: *FrameClock) void {
         if (self.timer_armed) return;
         self.ctx.loop.setTimer(&self.timer, .{
@@ -136,47 +139,41 @@ pub const FrameClock = struct {
         _ = self.ctx.loop.clearTimer(&self.timer);
     }
 
-    /// Answer the engine from the cached frame time, clearing the cache so it
-    /// can never be fired twice or out of order.
     fn fireTick(self: *FrameClock) void {
         const tick = self.tick.?;
         self.tick = null;
         self.ctx.eng.fireVsync(tick.start_ns, tick.target_ns);
     }
 
-    /// The compositor saying the surface has been repainted: the display's frame
-    /// clock tick.
+    /// The compositor saying one surface was repainted. Record it (do not fire);
+    /// `service` fires it, coalescing every surface of the same scanout into one
+    /// vsync.
     fn onFrame(callback: *wl.Callback, event: wl.Callback.Event, self: *FrameClock) void {
         switch (event) {
             .done => {
-                // The compositor destroys the object after firing it; the proxy
-                // on this side is ours to free, and has no destructor request.
-                callback.destroy();
-                self.callback = null;
-                self.clearTimer();
-
-                // Cache the freshest frame time; a request that arrives before
-                // the next repaint is answered from it. Overwriting every time
-                // keeps a stale tick from being fired after a newer frame's
-                // timestamp.
                 self.tick = vsyncTimes(self.ctx.eng.currentTime(), self.period_ns);
-                if (self.ctx.eng.hasVsyncRequests()) self.fireTick();
-                _ = self.arm();
+                self.clearTimer();
+                for (self.surfaces.items) |*entry| {
+                    if (entry.callback == callback) {
+                        entry.callback = null;
+                        callback.destroy();
+                        self.arm(entry); // re-arm so the next commit is tracked
+                        break;
+                    }
+                }
             },
         }
     }
 
-    /// No frame tick arrived within two refresh periods. The frame request
-    /// stays armed for the next repaint, but the engine gets a tick from our
-    /// own clock so it does not stall.
+    /// No frame tick arrived within two refresh periods. The frame request stays
+    /// armed, but the engine gets a tick from our own clock so it does not
+    /// stall, and keeps committing so a reappearing surface can resume.
     fn onTimeout(_: *ev.Loop, c: *ev.Completion) void {
         const self: *FrameClock = @ptrCast(@alignCast(c.userdata.?));
         self.timer_armed = false;
 
         if (!self.ctx.eng.hasVsyncRequests()) return;
-        // A tick that arrived while the timer was firing already answered
-        // whatever was waiting; let the normal path deal with it.
-        if (self.tick != null or self.callback == null) return self.service();
+        if (self.tick != null) return self.service();
 
         const now = self.ctx.eng.currentTime();
         self.ctx.eng.fireVsync(now, now + self.period_ns);
@@ -187,11 +184,9 @@ const VsyncTimes = struct { start_ns: u64, target_ns: u64 };
 
 /// The frame timestamps to hand back to the engine, in the engine's own clock:
 /// the start is "now" and the target one refresh later. The compositor's frame
-/// callback time is deliberately not used for the start, even though it lines
-/// up with the same monotonic clock in practice: it is truncated to whole
-/// milliseconds, and mixing it with the engine's nanosecond clock makes the
-/// reported start step backwards by the sub-millisecond remainder, which the
-/// engine rejects.
+/// callback time is deliberately not used for the start: it is truncated to
+/// whole milliseconds, and mixing it with the engine's nanosecond clock makes
+/// the reported start step backwards, which the engine rejects.
 fn vsyncTimes(now_ns: u64, period_ns: u64) VsyncTimes {
     return .{ .start_ns = now_ns, .target_ns = now_ns + period_ns };
 }
@@ -199,7 +194,6 @@ fn vsyncTimes(now_ns: u64, period_ns: u64) VsyncTimes {
 test "the vsync timestamps are the engine's clock, target one refresh ahead" {
     const testing = std.testing;
 
-    // 165 Hz: 6.06 ms per refresh.
     const period = 6_060_238;
     const now: u64 = 10 * std.time.ns_per_ms;
     const times = vsyncTimes(now, period);
