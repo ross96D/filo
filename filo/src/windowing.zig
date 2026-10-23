@@ -3,7 +3,7 @@
 //! Dart reaches these symbols through `dart:ffi`. The embedder installs a
 //! `Host` at startup; the exported functions are thin, C-ABI wrappers around it
 //! so the wire structs live in one place and the implementation stays in
-//! `main.zig`, where the `App` and its window registry live.
+//! `app.zig`, where the `App` and its window registry live.
 //!
 //! The functions must be called from the main (UI) thread. `AddView` is only
 //! synchronous on that thread; see `engine.zig`'s task-runner comment.
@@ -140,8 +140,8 @@ pub const empty_callbacks = WindowCallbacks{
 
 pub const Status = enum(i32) { ok = 0, invalid_argument = 1, unknown_view = 2, unsupported = 3, backend_failed = 4 };
 
-/// The embedder's implementation of the ABI. `main.zig` fills this in and calls
-/// `install` once the `App` exists.
+/// The embedder's implementation of the ABI. `runtime.zig` fills this in and
+/// calls `install` once the `App` exists.
 pub const Host = struct {
     ctx: ?*anyopaque,
     vtable: VTable,
@@ -246,6 +246,13 @@ var host: Host = undefined;
 
 pub fn install(new_host: Host) void {
     host = new_host;
+}
+
+/// Clear the installed host. Called once the engine and views are gone, so a
+/// late call cannot reach freed embedder state; the bridge callbacks see a null
+/// context and panic rather than following a stale pointer.
+pub fn uninstall() void {
+    host.ctx = null;
 }
 
 //------------------------------------------------------------------------------

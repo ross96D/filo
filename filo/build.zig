@@ -47,6 +47,28 @@ pub fn build(b: *std.Build) void {
     xkb_c.addIncludePath(b.path("vendor/xkb"));
     const xkb = xkb_c.createModule();
 
+    // The package's public module. Consumers fetch the package and import this
+    // module; they statically compile it into their own executable. libc and
+    // the system libraries are set here so importing the module is enough.
+    const filo_mod = b.addModule("filo", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    filo_mod.addImport("wayland", wayland);
+    filo_mod.addImport("flutter", flutter);
+    filo_mod.addImport("vulkan", vulkan);
+    filo_mod.addImport("xkb", xkb);
+    filo_mod.addImport("zio", zio.module("zio"));
+    filo_mod.linkSystemLibrary("wayland-client", .{});
+    filo_mod.linkSystemLibrary("xkbcommon", .{});
+
+    // The development runner, checks, formatting and tests belong to the
+    // package when it is the root. As a fetched dependency, filo only provides
+    // `module("filo")`.
+    if (!b.isRoot()) return;
+
     const exe = b.addExecutable(.{
         .name = "filo",
         .root_module = b.createModule(.{
@@ -56,18 +78,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-
-    exe.root_module.addImport("wayland", wayland);
-    exe.root_module.addImport("flutter", flutter);
-    exe.root_module.addImport("vulkan", vulkan);
-    exe.root_module.addImport("xkb", xkb);
-    exe.root_module.addImport("zio", zio.module("zio"));
-    exe.root_module.linkSystemLibrary("wayland-client", .{});
-    exe.root_module.linkSystemLibrary("xkbcommon", .{});
+    exe.root_module.addImport("filo", filo_mod);
 
     // `src/windowing.zig` exports the `filo_window_*` C ABI. Dart reaches it
     // through `DynamicLibrary.executable()`, which needs the symbols in the
-    // executable's dynamic symbol table.
+    // executable's dynamic symbol table. A consumer's host exe needs the same
+    // setting.
     exe.rdynamic = true;
 
     b.installArtifact(exe);
@@ -115,4 +131,5 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.linkSystemLibrary("xkbcommon", .{});
     const run_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_tests.step);
+    check_step.dependOn(&unit_tests.step);
 }

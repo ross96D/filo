@@ -6,7 +6,7 @@ FILO_DIR="${SCRIPT_DIR}/filo"
 cd "$FILO_DIR"
 
 MODE="${1:-debug}"
-APP_DIR="$SCRIPT_DIR/demo"
+APP_DIR="$SCRIPT_DIR/windowing_demo"
 
 case "$MODE" in
   debug|jit)
@@ -31,7 +31,7 @@ if [ ! -f "$ENGINE_LIB" ]; then echo "missing engine lib: $ENGINE_LIB" >&2; exit
 if [ ! -f "$ICU_DATA" ]; then echo "missing icu data: $ICU_DATA" >&2; exit 1; fi
 if [ ! -d "$ASSETS" ]; then
   echo "missing flutter assets: $ASSETS" >&2
-  echo "build them in demo/ with:  flutter build bundle   (debug)  or  flutter build linux --release" >&2
+  echo "build them in windowing_demo/ with:  flutter build bundle   (debug)  or  flutter build linux --release" >&2
   exit 1
 fi
 if [ -n "$AOT_LIB" ] && [ ! -f "$AOT_LIB" ]; then echo "missing aot lib: $AOT_LIB" >&2; exit 1; fi

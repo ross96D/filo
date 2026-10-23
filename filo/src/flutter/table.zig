@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const zart = @import("zart");
-
 /// One row of a `Table`: the name to match, and the value it maps to.
 pub fn Entry(comptime T: type) type {
     return struct {

@@ -5,7 +5,10 @@
 //! inside the module path.
 
 test {
+    _ = @import("app.zig");
     _ = @import("engine.zig");
+    _ = @import("lib.zig");
+    _ = @import("runtime.zig");
     _ = @import("wayland/clipboard.zig");
     _ = @import("wayland/connection.zig");
     _ = @import("wayland/frame_clock.zig");
