@@ -2,19 +2,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+FILO_DIR="${SCRIPT_DIR}/filo"
+cd "$FILO_DIR"
 
 MODE="${1:-debug}"
 APP_DIR="$SCRIPT_DIR/windowing_demo"
 
 case "$MODE" in
   debug|jit)
-    ENGINE_LIB="$SCRIPT_DIR/flutter-engine/debug/libflutter_engine.so"
+    ENGINE_LIB="$FILO_DIR/flutter-engine/debug/libflutter_engine.so"
     ASSETS="$APP_DIR/build/flutter_assets"
     AOT_LIB=""
     ;;
   release|aot)
-    ENGINE_LIB="$SCRIPT_DIR/flutter-engine/release/libflutter_engine.so"
+    ENGINE_LIB="$FILO_DIR/flutter-engine/release/libflutter_engine.so"
     ASSETS="$APP_DIR/build/linux/x64/release/bundle/data/flutter_assets"
     AOT_LIB="$APP_DIR/build/linux/x64/release/bundle/lib/libapp.so"
     ;;
@@ -24,7 +25,7 @@ case "$MODE" in
     ;;
 esac
 
-ICU_DATA="$SCRIPT_DIR/flutter-engine/shared/icudtl.dat"
+ICU_DATA="$FILO_DIR/flutter-engine/shared/icudtl.dat"
 
 if [ ! -f "$ENGINE_LIB" ]; then echo "missing engine lib: $ENGINE_LIB" >&2; exit 1; fi
 if [ ! -f "$ICU_DATA" ]; then echo "missing icu data: $ICU_DATA" >&2; exit 1; fi
@@ -37,11 +38,11 @@ if [ -n "$AOT_LIB" ] && [ ! -f "$AOT_LIB" ]; then echo "missing aot lib: $AOT_LI
 
 zig build
 
-export FEMBED_ENGINE_LIB="$ENGINE_LIB"
-export FEMBED_ICU_DATA="$ICU_DATA"
-export FEMBED_ASSETS="$ASSETS"
+export FILO_ENGINE_LIB="$ENGINE_LIB"
+export FILO_ICU_DATA="$ICU_DATA"
+export FILO_ASSETS="$ASSETS"
 if [ -n "$AOT_LIB" ]; then
-  export FEMBED_AOT_LIB="$AOT_LIB"
+  export FILO_AOT_LIB="$AOT_LIB"
 fi
 
-exec ./zig-out/bin/fembed
+exec ./zig-out/bin/filo

@@ -8,7 +8,7 @@ import 'cute_mascot.dart';
 /// Window lifecycle requests to the embedder. The replies are acknowledgements
 /// only; a new [FlutterView] shows up through `didChangeMetrics`.
 const MethodChannel _windows = MethodChannel(
-  'fembed/windows',
+  'filo/windows',
   JSONMethodCodec(),
 );
 
@@ -91,7 +91,7 @@ class WindowApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'fembed view $viewId',
+      title: 'filo view $viewId',
       home: WindowPage(viewId: viewId),
     );
   }
@@ -225,7 +225,7 @@ class _WindowPageState extends State<WindowPage> {
                           ],
                         ),
                         Text(
-                          'fembed view ${widget.viewId}',
+                          'filo view ${widget.viewId}',
                           style: TextStyle(
                             color: palette.ink,
                             fontSize: 22,

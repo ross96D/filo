@@ -1,17 +1,17 @@
 # multiwindow_demo
 
-A second fembed demo that uses Flutter's public low-level multi-view API:
+A second filo demo that uses Flutter's public low-level multi-view API:
 
 - `runWidget` + `ViewCollection` + one `View` per `FlutterView`
 - `WidgetsBindingObserver.didChangeMetrics` to pick up view add/remove
-- `MethodChannel('fembed/windows', JSONMethodCodec())` for window create/close
+- `MethodChannel('filo/windows', JSONMethodCodec())` for window create/close
 
 The initial window is the implicit Flutter view (id 0). "New window" asks the
 embedder to open another Wayland window and add a Flutter view for it.
 
 ## Build
 
-From this directory, using the `fembed` Flutter environment:
+From this directory, using the `filo` Flutter environment:
 
 ```sh
 flutter pub get
@@ -30,7 +30,7 @@ From the repository root:
 To open an extra window at startup without clicking:
 
 ```sh
-FEMBED_EXTRA_WINDOWS=1 ./run-multiwindow.sh debug
+FILO_EXTRA_WINDOWS=1 ./run-multiwindow.sh debug
 ```
 
 Closing a secondary window removes its view. Closing the initial window (view 0)
