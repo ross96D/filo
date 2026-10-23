@@ -34,7 +34,6 @@ pub fn build(b: *std.Build) void {
         .registry = b.path("vendor/protocols/vk.xml"),
     }).module("vulkan-zig");
 
-    const zart = b.dependency("zart", .{});
     const zio = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
@@ -62,7 +61,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("flutter", flutter);
     exe.root_module.addImport("vulkan", vulkan);
     exe.root_module.addImport("xkb", xkb);
-    exe.root_module.addImport("zart", zart.module("zart"));
     exe.root_module.addImport("zio", zio.module("zio"));
     exe.root_module.linkSystemLibrary("wayland-client", .{});
     exe.root_module.linkSystemLibrary("xkbcommon", .{});
@@ -112,7 +110,6 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("xkb", xkb);
     unit_tests.root_module.addImport("vulkan", vulkan);
     unit_tests.root_module.addImport("wayland", wayland);
-    unit_tests.root_module.addImport("zart", zart.module("zart"));
     unit_tests.root_module.addImport("zio", zio.module("zio"));
     unit_tests.root_module.linkSystemLibrary("wayland-client", .{});
     unit_tests.root_module.linkSystemLibrary("xkbcommon", .{});

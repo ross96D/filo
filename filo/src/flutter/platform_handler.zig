@@ -29,7 +29,7 @@ pub const PlatformHandler = struct {
     /// Response handle for an in-flight `Clipboard.getData`.
     pending_get: ?*const c.FlutterPlatformMessageResponseHandle = null,
     /// Method name → what to do with it.
-    methods: table.Table(Method),
+    methods: table.CompiletimeTable(Method),
 
     /// The methods on this channel this embedder acts on. Everything else the
     /// framework sends here (SystemChrome, SystemSound, lifecycle
@@ -58,12 +58,12 @@ pub const PlatformHandler = struct {
             .eng = eng,
             .clipboard = clipboard_ptr,
             .io = io,
-            .methods = table.Table(Method).init(allocator, &method_table),
+            .methods = table.CompiletimeTable(Method).init(&method_table),
         };
     }
 
     pub fn deinit(self: *PlatformHandler) void {
-        self.methods.deinit();
+        _ = self;
     }
 
     /// Register with the clipboard. Must be called once the handler is at its

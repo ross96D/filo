@@ -1517,7 +1517,7 @@ pub fn main(init: std.process.Init) !void {
     var app = App{
         .ctx = undefined,
         .vk = &vk_ctx,
-        .channels = platform_channel.Registry.init(allocator),
+        .channels = platform_channel.Registry.init(),
         .windowing_spike = init.environ_map.get("FILO_WINDOWING_SPIKE") != null,
     };
     defer app.channels.deinit();

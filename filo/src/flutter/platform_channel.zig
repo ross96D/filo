@@ -24,16 +24,16 @@ pub const Registry = struct {
     windows: ?*window_manager.WindowManager = null,
     mouse_cursor: ?*mouse_cursor.MouseCursor = null,
     /// Channel name → route, built from `channels.routes`.
-    routes: table.Table(channels.Route),
+    routes: table.CompiletimeTable(channels.Route),
 
     /// Build the routing table. The handlers are attached afterwards, by writing
     /// the fields: they need the engine, which does not exist yet at this point.
-    pub fn init(allocator: std.mem.Allocator) Registry {
-        return .{ .routes = table.Table(channels.Route).init(allocator, &channels.routes) };
+    pub fn init() Registry {
+        return .{ .routes = table.CompiletimeTable(channels.Route).init(&channels.routes) };
     }
 
     pub fn deinit(self: *Registry) void {
-        self.routes.deinit();
+        _ = self;
     }
 
     pub fn handle(self: *Registry, message: *const c.FlutterPlatformMessage) void {
@@ -124,7 +124,7 @@ test "messages are routed by channel name and answered with that channel's codec
     eng.procs = std.mem.zeroes(c.FlutterEngineProcTable);
     eng.procs.SendPlatformMessageResponse = &testSendResponse;
 
-    var registry = Registry.init(testing.allocator);
+    var registry = Registry.init();
     defer registry.deinit();
     registry.eng = &eng;
 

@@ -47,7 +47,7 @@ pub const TextInput = struct {
     text: std.ArrayListUnmanaged(u8) = .empty,
     selection: types.TextSelection = types.TextSelection.invalid,
     /// Method name → what to do with it.
-    methods: table.Table(Method),
+    methods: table.CompiletimeTable(Method),
 
     /// The methods the framework sends on `flutter/textinput`. The ones this
     /// embedder acts on have their own tag; the rest are accepted and
@@ -87,13 +87,12 @@ pub const TextInput = struct {
         return .{
             .allocator = allocator,
             .eng = eng,
-            .methods = table.Table(Method).init(allocator, &method_table),
+            .methods = table.CompiletimeTable(Method).init(&method_table),
         };
     }
 
     pub fn deinit(self: *TextInput) void {
         self.text.deinit(self.allocator);
-        self.methods.deinit();
     }
 
     /// The editing state as the framework models it, borrowing the buffer.

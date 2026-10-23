@@ -100,8 +100,7 @@ pub const routes = [_]table.Entry(Route){
 test "routes carry the handler and codec of each channel the framework sends" {
     const testing = std.testing;
 
-    var routes_table = table.Table(Route).init(testing.allocator, &routes);
-    defer routes_table.deinit();
+    var routes_table = table.CompiletimeTable(Route).init(&routes);
 
     // The channels we implement speak `JSONMethodCodec`.
     const text_input_route = routes_table.get(text_input.name).?;
