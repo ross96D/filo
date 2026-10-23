@@ -60,7 +60,7 @@ packages:
   filo_windowing:
     dependency: "direct main"
     description:
-      path: "../packages/filo_windowing"
+      path: "../../packages/filo_windowing"
       relative: true
     source: path
     version: "0.1.0"

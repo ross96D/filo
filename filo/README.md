@@ -74,6 +74,7 @@ it is enough.
 | `trace` | Print per-frame synchronization timings |
 | `extra_windows` | Open this many extra test views at startup |
 | `windowing_spike` | Exercise the exported windowing ABI from the event loop |
+| `engine_args` | Extra engine switches, e.g. Flutter's `${engineOptions}` |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
@@ -82,7 +83,9 @@ it is enough.
 configuration can build a `Config` directly.
 
 The runtime copies the config strings, so the caller's buffers only need to
-live until `Runtime.init` returns.
+live until `Runtime.init` returns. `engine_args` is the exception: the runtime
+only reads it during `Runtime.init`, so the backing strings need to live until
+then, not for the runtime's lifetime.
 
 ## Lifecycle
 
@@ -110,6 +113,23 @@ try runtime.run(); // blocks
 must be built with `rdynamic`/`--export-dynamic`. No `dlopen` or `libfilo.so`
 is involved.
 
+## Flutter custom devices
+
+For `flutter run -d <device>`, use the per-app runner template in
+[`templates/wayland/`](templates/wayland/README.md). The working example in this
+repository is `demos/multiple_windows/wayland/`. The template contains:
+
+- a Zig host that imports `filo` and calls `filo.run`,
+- `postBuild`/`install`/`uninstall`/`runDebug` hooks,
+- a `custom-device.json` and a registration script.
+
+Copy it into an app as `wayland/`, fetch filo into it, provide an engine path in
+`.env.local`, and register the device once with `wayland/register-device.sh`.
+The same global device entry works for every app that has a `wayland/` folder.
+
+Flutter custom devices only support debug builds. Release builds still need a
+separate AOT bundle and a manual launch with `FILO_AOT_LIB` set.
+
 ## Development
 
 ```sh
@@ -120,6 +140,5 @@ zig build test     # unit tests
 zig build fmt      # format in place
 ```
 
-The scripts in the repository root (`run.sh`, `run-windowing.sh`,
-`run-multiwindow.sh`) set the engine, ICU and asset paths and run the
-development runner.
+The repository root `run.sh` sets the engine, ICU and asset paths and runs the
+development runner. For `flutter run`, use the custom-device template above.

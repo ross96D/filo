@@ -20,6 +20,7 @@
         "build.zig.zon",
         "README.md",
         "src",
+        "templates",
         "vendor",
     },
 }

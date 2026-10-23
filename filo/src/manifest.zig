@@ -18,6 +18,10 @@ pub const Config = struct {
     extra_windows: u32 = 0,
     /// Exercise the exported windowing ABI from the event loop.
     windowing_spike: bool = false,
+    /// Extra engine switches, as passed by Flutter's custom-device
+    /// `runDebug` `${engineOptions}`. The strings are borrowed until
+    /// `Runtime.init` returns; the runtime does not keep them.
+    engine_args: []const []const u8 = &.{},
 
     /// Read the `FILO_*` environment variables. This keeps the development
     /// runner working; a host that has its own configuration should construct

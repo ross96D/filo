@@ -6,7 +6,7 @@ FILO_DIR="${SCRIPT_DIR}/filo"
 cd "$FILO_DIR"
 
 MODE="${1:-debug}"
-APP_DIR="$SCRIPT_DIR/demos/windowing_demo"
+APP_DIR="${FILO_APP_DIR:-$SCRIPT_DIR/demos/multiple_windows}"
 
 case "$MODE" in
   debug|jit)

@@ -6,14 +6,6 @@ const c = @import("flutter");
 
 const GetProcAddressesFn = *const fn (*c.FlutterEngineProcTable) callconv(.c) c.FlutterEngineResult;
 
-/// Command line switches handed to the engine. Impeller is opt-in: without
-/// `--enable-impeller` the engine renders with Skia.
-const skia_switches = [_][*:0]const u8{"filo"};
-const impeller_switches = [_][*:0]const u8{
-    "filo",
-    "--enable-impeller",
-};
-
 /// A task queue that bridges the engine's platform task runner to our main
 /// (Wayland) thread. The engine posts platform tasks from its own threads; we
 /// collect them here and execute them via `FlutterEngineRunTask` from the event
@@ -280,12 +272,25 @@ pub const Engine = struct {
         args.vsync_callback = vsync_callback;
         args.view_focus_change_request_callback = view_focus_change_request_callback;
         args.compositor = compositor;
-        const engine_switches: []const [*:0]const u8 = if (cfg.force_impeller)
-            &impeller_switches
-        else
-            &skia_switches;
-        args.command_line_argc = @intCast(engine_switches.len);
-        args.command_line_argv = @ptrCast(engine_switches.ptr);
+
+        // The engine's command line. Impeller is opt-in: without
+        // `--enable-impeller` the engine renders with Skia. The host adds the
+        // switches Flutter passes to a custom device's `runDebug`, such as
+        // `--enable-checked-mode=true`, `--vm-service-port=...` and
+        // `--route=...`.
+        var argv_arena = std.heap.ArenaAllocator.init(allocator);
+        defer argv_arena.deinit();
+        const argv_allocator = argv_arena.allocator();
+
+        var engine_argv: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+        try engine_argv.append(argv_allocator, "filo");
+        if (cfg.force_impeller) try engine_argv.append(argv_allocator, "--enable-impeller");
+        for (cfg.engine_args) |arg| {
+            const arg_z = try argv_allocator.dupeSentinel(u8, arg, 0);
+            try engine_argv.append(argv_allocator, arg_z.ptr);
+        }
+        args.command_line_argc = @intCast(engine_argv.items.len);
+        args.command_line_argv = @ptrCast(engine_argv.items.ptr);
 
         if (self.procs.Initialize.?(@intCast(c.FLUTTER_ENGINE_VERSION), renderer, &args, user_data, &self.handle) != 0)
             return error.EngineInitializeFailed;

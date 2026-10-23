@@ -1,0 +1,12 @@
+.{
+    .name = .filo_wayland_host,
+    .version = "0.0.0",
+    .fingerprint = 0x7b721435d0544b1c,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

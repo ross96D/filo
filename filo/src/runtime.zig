@@ -97,6 +97,7 @@ pub const Runtime = struct {
             .trace = config.trace,
             .extra_windows = config.extra_windows,
             .windowing_spike = config.windowing_spike,
+            .engine_args = config.engine_args,
         };
 
         const conn = try connection.Connection.connect(allocator);
@@ -153,6 +154,10 @@ pub const Runtime = struct {
         );
         self.eng = eng;
         self.app.channels.eng = eng;
+
+        // The engine parses the switches during `Engine.init`; do not keep the
+        // caller's borrowed argv pointers around after that.
+        self.config.engine_args = &.{};
 
         // The globals are only complete once the engine exists.
         self.app.ctx = .{
