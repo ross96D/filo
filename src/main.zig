@@ -23,6 +23,7 @@ const platform_channel = @import("flutter/platform_channel.zig");
 const window_manager = @import("flutter/window_manager.zig");
 const mouse_cursor = @import("flutter/mouse_cursor.zig");
 const windowing = @import("windowing.zig");
+const max_content_size = @import("wayland/window.zig").max_content_size;
 
 /// One native window and the Flutter view rendered into it.
 const View = struct {
@@ -48,6 +49,28 @@ const View = struct {
     /// The title the bridge last set, kept so the handle/getter can return it.
     title: [256]u8 = @splat(0),
     title_len: usize = 0,
+    /// The size the surface currently has, packed as width << 32 | height.
+    /// `presentView` runs on the raster thread, so it cannot read the
+    /// main-thread window fields directly.
+    content_size: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    /// A content resize is queued or waiting for the popup configure.
+    content_resize_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn packedSize(width: u32, height: u32) u64 {
+        return (@as(u64, width) << 32) | @as(u64, height);
+    }
+
+    fn updateContentSize(self: *View, width: u32, height: u32) void {
+        self.content_size.store(packedSize(width, height), .release);
+    }
+
+    fn contentWidth(self: *const View) u32 {
+        return @intCast(self.content_size.load(.acquire) >> 32);
+    }
+
+    fn contentHeight(self: *const View) u32 {
+        return @truncate(self.content_size.load(.acquire));
+    }
 
     /// Store the title the bridge exposes to Dart, truncated to the fixed buffer
     /// that backs `FiloWindowHandle.title` and the future `get_title`.
@@ -67,10 +90,15 @@ const View = struct {
     /// registered callbacks. Runs on the main (UI) thread.
     fn emitWindowEvents(self: *View, eng: *engine.Engine) void {
         if (self.win.resized) {
+            self.updateContentSize(self.win.width, self.win.height);
             self.win.applyResize(eng, self.id);
             if (self.callbacks.on_configure) |on_configure| {
                 on_configure(@intCast(self.win.width), @intCast(self.win.height));
             }
+        }
+        if (self.win.popup_configured) {
+            self.win.popup_configured = false;
+            self.content_resize_pending.store(false, .release);
         }
         if (self.win.state_dirty) {
             self.win.state_dirty = false;
@@ -154,6 +182,7 @@ const App = struct {
             .win = win,
             .surface = surface,
         };
+        view.updateContentSize(win.width, win.height);
 
         try self.frame_clock.?.addSurface(win.surface);
         errdefer self.frame_clock.?.removeSurface(win.surface);
@@ -190,12 +219,14 @@ const App = struct {
     }
 
     /// Create a toplevel from a windowing request and apply its properties.
-    fn createToplevel(self: *App, req: *const windowing.WindowRequest) !*View {
+    fn createToplevel(self: *App, req: *windowing.WindowRequest) !*View {
+        const sized_to_content = req.sized_to_content != 0;
         // The first regular window may adopt the implicit view (id 0), which
         // `main` already created and added.
         if (req.preferred_view_id == 0 and !self.implicit_adopted) {
             if (self.viewForId(0)) |view| {
                 self.implicit_adopted = true;
+                view.win.applyRequest(req);
                 if (req.title) |title| {
                     view.win.setTitle(title);
                     view.setViewTitleZ(req.title);
@@ -212,6 +243,18 @@ const App = struct {
                     view.win.setMaxSize(req.max_size);
                 }
                 view.win.commit();
+
+                if (req.sized_to_content != 0) {
+                    self.ctx.eng.sendWindowMetricsForView(
+                        view.id,
+                        view.win.width,
+                        view.win.height,
+                        view.win.pixel_ratio,
+                        view.win.metricsConstraints(),
+                    );
+                    self.ctx.eng.scheduleFrame();
+                }
+
                 view.win.resized = false;
                 view.win.state_dirty = false;
                 view.win.capabilities_dirty = false;
@@ -219,11 +262,24 @@ const App = struct {
             }
         }
 
-        const width: u32 = if (req.size.width > 0) @min(req.size.width, 16_384) else 800;
-        const height: u32 = if (req.size.height > 0) @min(req.size.height, 16_384) else 600;
+        const initial_width = @max(1, @min(req.min_size.width, max_content_size));
+        const initial_height = @max(1, @min(req.min_size.height, max_content_size));
+        const width: u32 = if (req.size.width > 0)
+            @min(req.size.width, max_content_size)
+        else if (sized_to_content)
+            initial_width
+        else
+            800;
+        const height: u32 = if (req.size.height > 0)
+            @min(req.size.height, max_content_size)
+        else if (sized_to_content)
+            initial_height
+        else
+            600;
 
         const view = try self.createView(width, height);
         errdefer self.destroyView(view);
+        view.win.applyRequest(req);
 
         if (req.parent_view_id >= 0) {
             const parent = self.viewForId(req.parent_view_id) orelse return error.UnknownParent;
@@ -233,7 +289,13 @@ const App = struct {
         if (req.title) |title| view.win.setTitle(title);
         view.setViewTitleZ(req.title);
 
-        if (req.resizable == 0) {
+        if (sized_to_content) {
+            // Until the first frame arrives, only the requested constraints
+            // apply. A non-resizable sized-to-content window is pinned to its
+            // content size once that size is known.
+            view.win.setMinSize(req.min_size);
+            view.win.setMaxSize(req.max_size);
+        } else if (req.resizable == 0) {
             const fixed = if (req.size.width > 0 and req.size.height > 0)
                 windowing.Size{ .width = req.size.width, .height = req.size.height }
             else
@@ -265,6 +327,13 @@ const App = struct {
         if (positioner.size.width == 0 or positioner.size.height == 0) {
             positioner.size = .{ .width = 1, .height = 1 };
         }
+        if (req.sized_to_content != 0) {
+            // The positioner's size is the initial surface size. It has to
+            // satisfy the engine's minimum constraint until the first frame
+            // reports the content size.
+            positioner.size.width = @max(positioner.size.width, @max(1, @min(req.min_size.width, 16_384)));
+            positioner.size.height = @max(positioner.size.height, @max(1, @min(req.min_size.height, 16_384)));
+        }
 
         const xdg_positioner = try makePositioner(self, positioner);
         defer xdg_positioner.destroy();
@@ -274,6 +343,7 @@ const App = struct {
 
         const view = try self.createPopupView(parent, xdg_positioner, width, height);
         errdefer self.destroyView(view);
+        view.win.applyRequest(req);
 
         view.win.positioner = positioner;
         view.win.resized = false;
@@ -291,18 +361,13 @@ const App = struct {
     ) !*View {
         const id = self.reserveViewId();
         const win = try self.ctx.conn.createPopup(parent.win, positioner);
-        var owned = true;
-        errdefer {
-            if (owned) win.destroy(self.ctx.allocator);
-        }
+        errdefer win.destroy(self.ctx.allocator);
 
         if (width > 0) win.width = width;
         if (height > 0) win.height = height;
         try self.ctx.conn.waitReady(win);
 
-        const view = try self.adoptView(id, win);
-        owned = false;
-        return view;
+        return try self.adoptView(id, win);
     }
 
     /// Create a view and tell the engine about it. Resources exist before the
@@ -325,6 +390,7 @@ const App = struct {
             view.win.width,
             view.win.height,
             view.win.pixel_ratio,
+            view.win.metricsConstraints(),
             op,
             addViewCallback,
         ) catch |err| {
@@ -389,6 +455,30 @@ const App = struct {
         eng.postMainTask(runViewOp, op);
     }
 
+    /// Queue a resize to the size the raster thread just drew at. Called from
+    /// `presentView`, so it must not touch Wayland or the view registry.
+    fn postContentResize(self: *App, view: *View, width: u32, height: u32) void {
+        if (view.content_resize_pending.swap(true, .acq_rel)) return;
+
+        const req = std.heap.c_allocator.create(ContentResizeRequest) catch {
+            view.content_resize_pending.store(false, .release);
+            return;
+        };
+        req.* = .{
+            .app = self,
+            .view_id = view.id,
+            .width = width,
+            .height = height,
+        };
+
+        const eng = self.engine.load(.acquire) orelse {
+            std.heap.c_allocator.destroy(req);
+            view.content_resize_pending.store(false, .release);
+            return;
+        };
+        eng.postMainTask(runContentResize, req);
+    }
+
     /// The engine has finished rendering a view into backing-store images. Blit
     /// them onto that view's swapchain and present it.
     fn presentView(self: *App, info: *const c.FlutterPresentViewInfo) bool {
@@ -429,6 +519,17 @@ const App = struct {
         }
         if (width == 0 or height == 0) return true;
 
+        // A sized-to-content surface follows the extent the engine drew at. A
+        // popup has to ask the compositor for that size before its first frame
+        // can be shown; a toplevel can show the frame and then update its
+        // native size and metrics.
+        if (view.win.isTrackingContentSize() and
+            (width != view.contentWidth() or height != view.contentHeight()))
+        {
+            self.postContentResize(view, width, height);
+            if (view.win.isPopup()) return true;
+        }
+
         view.surface.presentLayers(width, height, layers[0..count]) catch |err| {
             std.debug.print("fembed: compositor present failed for view {}: {}\n", .{ info.view_id, err });
             return false;
@@ -460,7 +561,7 @@ const App = struct {
 
     fn bridgeCreate(
         ctx: ?*anyopaque,
-        req: *const windowing.WindowRequest,
+        req: *windowing.WindowRequest,
         out: *windowing.WindowHandle,
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
@@ -487,6 +588,7 @@ const App = struct {
         };
 
         if (!view.added) {
+            std.debug.print("fembed: adding view\n", .{});
             beginAddViewSync(app, view) catch |err| {
                 std.debug.print("fembed: windowing create: AddView failed: {}\n", .{err});
                 if (err == error.AddViewNotSynchronous) {
@@ -640,6 +742,13 @@ const App = struct {
         var request = view.win.positioner;
         if (positioner) |value| request = value.*;
         if (anchor) |value| request.anchor_rect = value.*;
+        if (view.win.isSizedToContent()) {
+            // The surface size belongs to the content, not to the positioning
+            // request. Keeping the current size here prevents a later
+            // `updatePosition` from shrinking the popup back to its initial
+            // placeholder.
+            request.size = .{ .width = view.win.width, .height = view.win.height };
+        }
 
         const xdg_positioner = makePositioner(app, request) catch return .backend_failed;
         defer xdg_positioner.destroy();
@@ -765,6 +874,54 @@ const ViewOp = struct {
     ok: bool = false,
 };
 
+/// Baton for a resize requested by a rendered frame.
+const ContentResizeRequest = struct {
+    app: *App,
+    view_id: engine.ViewId,
+    width: u32,
+    height: u32,
+};
+
+fn runContentResize(user_data: ?*anyopaque) void {
+    const req: *ContentResizeRequest = @ptrCast(@alignCast(user_data.?));
+    defer std.heap.c_allocator.destroy(req);
+
+    const view = req.app.viewForId(req.view_id) orelse return;
+    if (!view.win.isTrackingContentSize()) {
+        view.content_resize_pending.store(false, .release);
+        return;
+    }
+
+    const width = @max(1, @min(req.width, 16_384));
+    const height = @max(1, @min(req.height, 16_384));
+
+    if (view.win.isPopup()) {
+        var positioner = view.win.positioner;
+        positioner.size = .{ .width = width, .height = height };
+
+        const xdg_positioner = makePositioner(req.app, positioner) catch {
+            view.content_resize_pending.store(false, .release);
+            return;
+        };
+        defer xdg_positioner.destroy();
+
+        view.win.reposition(xdg_positioner);
+        view.win.positioner = positioner;
+        view.win.commit();
+        // The configure event that follows clears the pending flag and sends
+        // the new metrics.
+        return;
+    }
+
+    view.win.applyContentSize(width, height);
+    view.updateContentSize(width, height);
+    // Wait for the compositor to confirm the size before tracking again. A
+    // tiled compositor may keep its own size, and resubmitting the frame size
+    // every frame would never converge.
+    view.win.track_content_size.store(false, .release);
+    view.content_resize_pending.store(false, .release);
+}
+
 fn addViewCallback(result: [*c]const c.FlutterAddViewResult) callconv(.c) void {
     if (result == null or result.*.user_data == null) return;
     const op: *ViewOp = @ptrCast(@alignCast(result.*.user_data.?));
@@ -835,6 +992,7 @@ fn beginAddViewSync(self: *App, view: *View) !void {
         view.win.width,
         view.win.height,
         view.win.pixel_ratio,
+        view.win.metricsConstraints(),
         view,
         addViewSyncCallback,
     );
@@ -1437,7 +1595,7 @@ pub fn main(init: std.process.Init) !void {
     };
     app.channels.mouse_cursor = &mc;
 
-    eng.sendWindowMetricsForView(0, first_view.win.width, first_view.win.height, first_view.win.pixel_ratio);
+    eng.sendWindowMetricsForView(0, first_view.win.width, first_view.win.height, first_view.win.pixel_ratio, null);
     // Without this the engine has no display at all and falls back for the
     // refresh rate it derives its frame budget from.
     if (conn.refresh_mhz != 0) {

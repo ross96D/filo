@@ -9,7 +9,6 @@ import 'positioner.dart';
 /// The kind of native window a controller owns.
 enum FiloWindowKind { toplevel, popup }
 
-
 enum FiloToplevelState {
   /// The surface is maximized.
   maximized(1),
@@ -129,9 +128,16 @@ class FiloRect {
   int width;
   int height;
 
-  FiloRect({required this.x, required this.y, required this.width, required this.height});
+  FiloRect({
+    required this.x,
+    required this.y,
+    required this.width,
+    required this.height,
+  });
 
-  FiloRect.size(this.x, this.y, FiloSize size) : width = size.width, height = size.height;
+  FiloRect.size(this.x, this.y, FiloSize size)
+    : width = size.width,
+      height = size.height;
 }
 
 enum FiloPositionerAnchor {
@@ -270,48 +276,25 @@ class FiloWindowHandle {
 
   final int viewId;
   final Size contentSize;
-  final Set<FiloToplevelState> toplevelState;
-  final Set<FiloToplevelWMCapabilities> wmCapabilities;
+
+  /// The `xdg_toplevel.state` bitmask, matching the native ABI.
+  final int toplevelState;
+
+  /// The `xdg_toplevel.wm_capabilities` bitmask, matching the native ABI.
+  final int wmCapabilities;
+
   final Offset offsetFromParent;
   final String? title;
 }
 
-/// An event the backend delivers for a window.
-sealed class FiloWindowEvent {
-  const FiloWindowEvent(this.viewId);
-
-  final int viewId;
+/// Bit positions for [FiloToplevelState] in the native state bitmask.
+extension FiloToplevelStateMask on FiloToplevelState {
+  int get mask => 1 << index;
 }
 
-/// The compositor or user asked the window to close.
-///
-/// The window is still alive; the controller's delegate decides whether to
-/// destroy it.
-final class FiloWindowCloseRequested extends FiloWindowEvent {
-  const FiloWindowCloseRequested(super.viewId);
-}
-
-/// The native window and its Flutter view are gone.
-final class FiloWindowDestroyed extends FiloWindowEvent {
-  const FiloWindowDestroyed(super.viewId);
-}
-
-/// Some window state changed. Fields that are null did not change.
-final class FiloWindowStateChanged extends FiloWindowEvent {
-  const FiloWindowStateChanged(
-    super.viewId, {
-    this.title,
-    this.toplevelState,
-    this.wmCapabilities,
-    this.contentSize,
-    this.offsetFromParent,
-  });
-
-  final String? title;
-  final Set<FiloToplevelState>? toplevelState;
-  final Set<FiloToplevelWMCapabilities>? wmCapabilities;
-  final Size? contentSize;
-  final Offset? offsetFromParent;
+/// Bit positions for [FiloToplevelWMCapabilities] in the native bitmask.
+extension FiloToplevelWMCapabilitiesMask on FiloToplevelWMCapabilities {
+  int get mask => 1 << index;
 }
 
 /// A backend operation failed.

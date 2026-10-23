@@ -147,7 +147,7 @@ pub const Host = struct {
     vtable: VTable,
 
     pub const VTable = struct {
-        create: *const fn (ctx: ?*anyopaque, request: *const WindowRequest, out: *WindowHandle) Status,
+        create: *const fn (ctx: ?*anyopaque, request: *WindowRequest, out: *WindowHandle) Status,
         destroy: *const fn (ctx: ?*anyopaque, view_id: i64) void,
         observe: *const fn (ctx: ?*anyopaque, view_id: i64, callbacks: WindowCallbacks) Status,
 
@@ -168,7 +168,7 @@ pub const Host = struct {
         get_offset: *const fn (ctx: ?*anyopaque, view_id: i64, out: *Offset) Status,
     };
 
-    pub fn create(self: Host, request: *const WindowRequest, out: *WindowHandle) Status {
+    pub fn create(self: Host, request: *WindowRequest, out: *WindowHandle) Status {
         return self.vtable.create(self.ctx, request, out);
     }
 
@@ -252,7 +252,7 @@ pub fn install(new_host: Host) void {
 // Exported C ABI. These are the symbols Dart looks up on the process image.
 //------------------------------------------------------------------------------
 
-pub export fn filo_window_create(request: ?*const WindowRequest, out: ?*WindowHandle) i32 {
+pub export fn filo_window_create(request: ?*WindowRequest, out: ?*WindowHandle) i32 {
     const req = request orelse return @backingInt(Status.invalid_argument);
     const handle = out orelse return @backingInt(Status.invalid_argument);
     handle.* = std.mem.zeroes(WindowHandle);
@@ -391,7 +391,7 @@ fn testDestroy(_: ?*anyopaque, view_id: i64) void {
     test_seen = view_id;
 }
 
-fn testObserve(_: ?*anyopaque, _: i64, _: *const WindowCallbacks) Status {
+fn testObserve(_: ?*anyopaque, _: i64, _: WindowCallbacks) Status {
     return .ok;
 }
 

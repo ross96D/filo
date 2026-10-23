@@ -11,6 +11,9 @@ const windowing = @import("../windowing.zig");
 const default_width = 800;
 const default_height = 600;
 
+/// The largest size a popup or content-sized window can ask the engine for.
+pub const max_content_size = 4_096;
+
 /// The scale factor reported to the engine. Wayland lets the compositor scale
 /// the buffer we attach instead, which is what we rely on: the swapchain is
 /// always as big as the engine drew. Fractional and integer buffer scale would
@@ -38,9 +41,29 @@ pub const Window = struct {
     width: u32 = default_width,
     height: u32 = default_height,
     pixel_ratio: f64 = default_pixel_ratio,
+    /// Whether the platform should derive the surface size from the first
+    /// rendered frame. Popups and sized-to-content windows set this.
+    ///
+    /// It is atomic because the raster thread checks it in `presentView` while
+    /// the main thread may adopt the implicit view as sized-to-content.
+    sized_to_content: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Whether later frame sizes should keep resizing the surface. For a
+    /// resizable sized-to-content toplevel this is cleared after the initial
+    /// size has been applied; a popup and a non-resizable window keep tracking.
+    track_content_size: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    resizable: bool = true,
+    /// Limits for engine metrics while tracking the content size. They are in
+    /// the same units as the metrics event, i.e. physical pixels.
+    content_min_width: u32 = 1,
+    content_min_height: u32 = 1,
+    content_max_width: u32 = max_content_size,
+    content_max_height: u32 = max_content_size,
     /// Set by a configure that changed the size, drained by the event loop,
     /// which forwards it to the engine.
     resized: bool = false,
+    /// A popup configure arrived. The event loop clears a pending content
+    /// resize, even if the compositor kept the old size.
+    popup_configured: bool = false,
     /// Set when the compositor asks the window to close.
     closing: bool = false,
     /// Bitmask of `windowing.ToplevelState`; several may be set at once.
@@ -119,6 +142,66 @@ pub const Window = struct {
         };
     }
 
+    /// Copy the sizing flags and bounds out of a windowing request.
+    pub fn applyRequest(self: *Window, req: *const windowing.WindowRequest) void {
+        const sized = req.sized_to_content != 0;
+        self.resizable = req.resizable != 0;
+        self.sized_to_content.store(sized, .release);
+        self.track_content_size.store(sized, .release);
+        self.setContentConstraints(req.min_size, req.max_size);
+    }
+
+    /// Update the limits used for engine metrics. A zero maximum means
+    /// unbounded, matching the ABI's encoding.
+    pub fn setContentConstraints(self: *Window, min: windowing.Size, max: windowing.Size) void {
+        self.content_min_width = boundedMin(min.width);
+        self.content_min_height = boundedMin(min.height);
+        self.content_max_width = boundedMax(max.width, self.content_min_width);
+        self.content_max_height = boundedMax(max.height, self.content_min_height);
+    }
+
+    pub fn isSizedToContent(self: *const Window) bool {
+        return self.sized_to_content.load(.acquire);
+    }
+
+    pub fn isTrackingContentSize(self: *const Window) bool {
+        return self.track_content_size.load(.acquire);
+    }
+
+    /// Bounds for the engine metrics event, or null for the normal tight case.
+    pub fn metricsConstraints(self: *const Window) ?engine.WindowConstraints {
+        if (!self.isTrackingContentSize()) return null;
+        return .{
+            .min_width = self.content_min_width,
+            .min_height = self.content_min_height,
+            .max_width = self.content_max_width,
+            .max_height = self.content_max_height,
+        };
+    }
+
+    /// Apply a size derived from a rendered frame to a toplevel. Popups get
+    /// their size through `xdg_popup.reposition` instead.
+    pub fn applyContentSize(self: *Window, width: u32, height: u32) void {
+        self.width = width;
+        self.height = height;
+        if (!self.resizable) {
+            const fixed = windowing.Size{ .width = width, .height = height };
+            self.setMinSize(fixed);
+            self.setMaxSize(fixed);
+            self.commit();
+        }
+        self.resized = true;
+    }
+
+    fn boundedMin(value: u32) u32 {
+        return @max(1, @min(value, max_content_size));
+    }
+
+    fn boundedMax(value: u32, min: u32) u32 {
+        if (value == 0) return max_content_size;
+        return @max(min, @min(value, max_content_size));
+    }
+
     fn toplevelRole(self: *Window) ?*xdg.Toplevel {
         return switch (self.role) {
             .toplevel => |toplevel| toplevel,
@@ -194,7 +277,7 @@ pub const Window = struct {
         self.resized = false;
 
         std.debug.print("fembed: view {} resized to {}x{}\n", .{ view_id, self.width, self.height });
-        eng.sendWindowMetricsForView(view_id, self.width, self.height, self.pixel_ratio);
+        eng.sendWindowMetricsForView(view_id, self.width, self.height, self.pixel_ratio, self.metricsConstraints());
         // A window metrics event makes the framework relayout and schedule a
         // frame on its own; asking for one anyway means a resize can never be
         // left unpainted.
@@ -224,7 +307,16 @@ pub const Window = struct {
                 // size already, and any rebuild it owes is driven by the size it
                 // reports per frame.
                 const size = configuredSize(configure.width, configure.height) orelse return;
-                if (size[0] == self.width and size[1] == self.height) return;
+                if (size[0] == self.width and size[1] == self.height) {
+                    // A non-resizable sized-to-content toplevel stopped
+                    // tracking while it asked the compositor for the content
+                    // size. A matching configure is the confirmation that lets
+                    // it track later content changes again.
+                    if (self.isSizedToContent() and !self.resizable) {
+                        self.track_content_size.store(true, .release);
+                    }
+                    return;
+                }
 
                 self.width = size[0];
                 self.height = size[1];
@@ -245,6 +337,7 @@ pub const Window = struct {
     fn popupListener(_: *xdg.Popup, event: xdg.Popup.Event, self: *Window) void {
         switch (event) {
             .configure => |configure| {
+                self.popup_configured = true;
                 self.offset_from_parent = .{ .x = configure.x, .y = configure.y };
                 self.offset_dirty = true;
 
@@ -256,7 +349,10 @@ pub const Window = struct {
                 self.resized = true;
             },
             // The compositor dismissed the popup; the client should destroy it.
-            .popup_done => self.popup_done = true,
+            .popup_done => {
+                std.debug.print("ASDLASHDAS\n", .{});
+                self.popup_done = true;
+            },
             // The following `configure` carries the new geometry.
             .repositioned => {},
         }

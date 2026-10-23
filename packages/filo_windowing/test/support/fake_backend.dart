@@ -7,20 +7,12 @@ import 'package:filo_windowing/filo_windowing.dart';
 import 'package:flutter/rendering.dart' show BoxConstraints;
 import 'package:flutter/src/widgets/_window_positioner.dart';
 
-/// A [FiloWindowingBackend] that records calls and lets a test emit events.
+/// A [FiloWindowingBackend] that records calls and exposes its observers so a
+/// test can drive the callbacks directly.
 class FakeBackend implements FiloWindowingBackend {
-  final StreamController<FiloWindowEvent> _events =
-      StreamController<FiloWindowEvent>.broadcast(sync: true);
-
   final List<FiloWindowRequest> requests = <FiloWindowRequest>[];
   final List<String> calls = <String>[];
-  final Map<int, Size> sizes = <int, Size>{};
-  final Map<int, Set<FiloToplevelState>> states =
-      <int, Set<FiloToplevelState>>{};
-  final Map<int, Set<FiloToplevelWMCapabilities>> capabilities =
-      <int, Set<FiloToplevelWMCapabilities>>{};
-  final Map<int, String> titles = <int, String>{};
-  final Map<int, Offset> offsets = <int, Offset>{};
+  final Map<int, FiloWindowObserver> observers = <int, FiloWindowObserver>{};
 
   /// The view id of the most recently created window.
   int? lastViewId;
@@ -28,11 +20,8 @@ class FakeBackend implements FiloWindowingBackend {
   int _nextId = 1;
   bool _adoptedImplicit = false;
 
-  @override
-  Stream<FiloWindowEvent> get events => _events.stream;
-
-  /// Deliver an event as the native backend would.
-  void emit(FiloWindowEvent event) => _events.add(event);
+  /// The observer registered for [viewId].
+  FiloWindowObserver observerFor(int viewId) => observers[viewId]!;
 
   @override
   FiloWindowHandle createWindow(FiloWindowRequest request) {
@@ -44,19 +33,20 @@ class FakeBackend implements FiloWindowingBackend {
     if (id == 0) _adoptedImplicit = true;
     lastViewId = id;
 
-    final size = request.size ?? const Size(1, 1);
-    sizes[id] = size;
-    titles[id] = request.title ?? '';
-    offsets[id] = Offset.zero;
-
     return FiloWindowHandle(
       viewId: id,
-      contentSize: size,
+      contentSize: request.size ?? const Size(1, 1),
       title: request.title,
-      toplevelState: const <FiloToplevelState>{},
-      wmCapabilities: const <FiloToplevelWMCapabilities>{},
+      toplevelState: 0,
+      wmCapabilities: 0,
       offsetFromParent: Offset.zero,
     );
+  }
+
+  @override
+  void observe(int viewId, FiloWindowObserver observer) {
+    observers[viewId] = observer;
+    calls.add('observe:$viewId');
   }
 
   @override
@@ -64,18 +54,18 @@ class FakeBackend implements FiloWindowingBackend {
     calls.add('destroy:$viewId');
     // The native removal is asynchronous; mimic that so callers do not rely on
     // a synchronous destroy callback.
-    scheduleMicrotask(() => _events.add(FiloWindowDestroyed(viewId)));
+    scheduleMicrotask(() {
+      observers.remove(viewId)?.onDestroy?.call();
+    });
   }
 
   @override
   void setTitle(int viewId, String title) {
-    titles[viewId] = title;
     calls.add('setTitle:$viewId:$title');
   }
 
   @override
   void setSize(int viewId, Size size) {
-    sizes[viewId] = size;
     calls.add('setSize:$viewId:${size.width}x${size.height}');
   }
 
@@ -109,21 +99,4 @@ class FakeBackend implements FiloWindowingBackend {
   @override
   void setParent(int viewId, int parentViewId) =>
       calls.add('setParent:$viewId:$parentViewId');
-
-  @override
-  Size getSize(int viewId) => sizes[viewId] ?? Size.zero;
-
-  @override
-  Set<FiloToplevelState> getState(int viewId) =>
-      states[viewId] ?? const <FiloToplevelState>{};
-
-  @override
-  Set<FiloToplevelWMCapabilities> getCapabilities(int viewId) =>
-      capabilities[viewId] ?? const <FiloToplevelWMCapabilities>{};
-
-  @override
-  String getTitle(int viewId) => titles[viewId] ?? '';
-
-  @override
-  Offset getOffset(int viewId) => offsets[viewId] ?? Offset.zero;
 }

@@ -20,63 +20,67 @@ void main() {
   setUp(() {
     backend = FakeBackend();
     view = WidgetsBinding.instance.platformDispatcher.views.first;
-    owner = installFiloWindowing(
-      backend: backend,
-      viewResolver: (_) => view,
-    );
+    owner = installFiloWindowing(backend: backend, viewResolver: (_) => view);
   });
 
-  test('a regular window adopts the implicit view and forwards its request', () {
-    final delegate = _RegularDelegate();
-    final controller = owner.createRegularWindowController(
-      delegate: delegate,
-      size: const Size(800, 600),
-      constraints: const BoxConstraints(minWidth: 320, minHeight: 240),
-      title: 'hello',
-      resizable: true,
-    );
+  test(
+    'a regular window adopts the implicit view and forwards its request',
+    () {
+      final delegate = _RegularDelegate();
+      final controller = owner.createRegularWindowController(
+        delegate: delegate,
+        size: const Size(800, 600),
+        constraints: const BoxConstraints(minWidth: 320, minHeight: 240),
+        title: 'hello',
+        resizable: true,
+      );
 
-    expect(controller.rootView, same(view));
-    expect(backend.lastViewId, 0);
+      expect(controller.rootView, same(view));
+      expect(backend.lastViewId, 0);
+      expect(backend.observers.keys, contains(0));
 
-    final request = backend.requests.single;
-    expect(request.kind, FiloWindowKind.toplevel);
-    expect(request.size, const Size(800, 600));
-    expect(
-      request.constraints,
-      const BoxConstraints(minWidth: 320, minHeight: 240),
-    );
-    expect(request.title, 'hello');
-    expect(request.preferredViewId, 0);
-    expect(request.parentViewId, -1);
-  });
+      final request = backend.requests.single;
+      expect(request.kind, FiloWindowKind.toplevel);
+      expect(request.size, const Size(800, 600));
+      expect(
+        request.constraints,
+        const BoxConstraints(minWidth: 320, minHeight: 240),
+      );
+      expect(request.title, 'hello');
+      expect(request.preferredViewId, 0);
+      expect(request.parentViewId, -1);
+    },
+  );
 
-  test('close requests go to the delegate', () {
+  test('close requests call the delegate directly', () {
     final delegate = _RegularDelegate();
     owner.createRegularWindowController(
       delegate: delegate,
       size: const Size(100, 100),
       resizable: true,
     );
+    final id = backend.lastViewId!;
 
-    backend.emit(FiloWindowCloseRequested(backend.lastViewId!));
+    backend.observerFor(id).onClose?.call();
+
     expect(delegate.closeRequests, 1);
   });
 
-  test('destroyed events mark the controller and notify the delegate', () {
+  test('onDestroy calls the delegate and marks the controller destroyed', () {
     final delegate = _RegularDelegate();
     final controller = owner.createRegularWindowController(
       delegate: delegate,
       size: const Size(100, 100),
       resizable: true,
     );
+    final id = backend.lastViewId!;
     var notified = 0;
     controller.addListener(() => notified++);
 
-    backend.emit(FiloWindowDestroyed(backend.lastViewId!));
+    backend.observerFor(id).onDestroy?.call();
 
     expect(delegate.destroyed, 1);
-    expect(notified, 1);
+    expect(notified, 0);
     expect(controller.contentSize, Size.zero);
   });
 
@@ -96,7 +100,7 @@ void main() {
     expect(delegate.destroyed, 1);
   });
 
-  test('state changes notify listeners', () {
+  test('onStateChanged updates the state and notifies listeners', () {
     final delegate = _RegularDelegate();
     final controller = owner.createRegularWindowController(
       delegate: delegate,
@@ -107,19 +111,74 @@ void main() {
     var notified = 0;
     controller.addListener(() => notified++);
 
-    backend.states[id] = {FiloToplevelState.activated};
-    backend.emit(
-      FiloWindowStateChanged(
-        id,
-        toplevelState: {FiloToplevelState.activated},
-      ),
-    );
+    backend
+        .observerFor(id)
+        .onStateChanged
+        ?.call(FiloToplevelState.activated.mask);
 
     expect(notified, 1);
     expect(controller.isActivated, isTrue);
   });
 
-  test('setTitle updates the backend and notifies', () {
+  test('onConfigure updates the content size and notifies listeners', () {
+    final delegate = _RegularDelegate();
+    final controller = owner.createRegularWindowController(
+      delegate: delegate,
+      size: const Size(100, 100),
+      resizable: true,
+    );
+    final id = backend.lastViewId!;
+    var notified = 0;
+    controller.addListener(() => notified++);
+
+    backend.observerFor(id).onConfigure?.call(const Size(640, 480));
+
+    expect(notified, 1);
+    expect(controller.contentSize, const Size(640, 480));
+  });
+
+  test('onMoved updates a popup offset and notifies listeners', () {
+    final regular = owner.createRegularWindowController(
+      delegate: _RegularDelegate(),
+      size: const Size(100, 100),
+      resizable: true,
+    );
+    final popup = owner.createPopupWindowController(
+      delegate: _PopupDelegate(),
+      constraints: const BoxConstraints(minWidth: 200, minHeight: 100),
+      anchorRect: const Rect.fromLTWH(10, 20, 30, 40),
+      positioner: const WindowPositioner(),
+      parent: regular,
+    );
+    final id = backend.lastViewId!;
+    var notified = 0;
+    popup.addListener(() => notified++);
+
+    backend.observerFor(id).onMoved?.call(const Offset(12, -8));
+
+    expect(notified, 1);
+    expect(popup.offsetFromParent, const Offset(12, -8));
+  });
+
+  test('onTitleChanged updates the title and notifies listeners', () {
+    final delegate = _RegularDelegate();
+    final controller = owner.createRegularWindowController(
+      delegate: delegate,
+      size: const Size(100, 100),
+      title: 'before',
+      resizable: true,
+    );
+    final id = backend.lastViewId!;
+    var notified = 0;
+    controller.addListener(() => notified++);
+
+    backend.observerFor(id).onTitleChanged?.call('native');
+
+    expect(notified, 1);
+    expect(controller.title, 'native');
+  });
+
+  test('setTitle updates the backend and the cached title', () {
     final delegate = _RegularDelegate();
     final controller = owner.createRegularWindowController(
       delegate: delegate,
@@ -133,7 +192,7 @@ void main() {
 
     controller.setTitle('after');
 
-    expect(backend.titles[id], 'after');
+    expect(backend.calls, contains('setTitle:$id:after'));
     expect(controller.title, 'after');
     expect(notified, 1);
   });

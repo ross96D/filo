@@ -93,12 +93,24 @@ pub const MainTask = struct {
     user_data: ?*anyopaque,
 };
 
+/// Bounds sent with a window metrics event. A null set of bounds means the
+/// engine should treat the current size as tight, which is the normal case for
+/// a window the user can resize.
+pub const WindowConstraints = struct {
+    min_width: usize = 0,
+    min_height: usize = 0,
+    max_width: usize = 0,
+    max_height: usize = 0,
+};
+
 fn windowMetrics(
     view_id: ViewId,
     width: usize,
     height: usize,
     dpr: f64,
+    constraints: ?WindowConstraints,
 ) c.FlutterWindowMetricsEvent {
+    const bounds = constraints orelse WindowConstraints{};
     return .{
         .struct_size = @sizeOf(c.FlutterWindowMetricsEvent),
         .width = width,
@@ -112,11 +124,11 @@ fn windowMetrics(
         .physical_view_inset_left = 0.0,
         .display_id = 0,
         .view_id = view_id,
-        .has_constraints = false,
-        .min_width_constraint = 0,
-        .min_height_constraint = 0,
-        .max_width_constraint = 0,
-        .max_height_constraint = 0,
+        .has_constraints = constraints != null,
+        .min_width_constraint = bounds.min_width,
+        .min_height_constraint = bounds.min_height,
+        .max_width_constraint = bounds.max_width,
+        .max_height_constraint = bounds.max_height,
     };
 }
 
@@ -290,7 +302,7 @@ pub const Engine = struct {
 
     /// Send metrics for the implicit view, which every engine has.
     pub fn sendWindowMetrics(self: *Engine, width: usize, height: usize, dpr: f64) void {
-        self.sendWindowMetricsForView(0, width, height, dpr);
+        self.sendWindowMetricsForView(0, width, height, dpr, null);
     }
 
     pub fn sendWindowMetricsForView(
@@ -299,8 +311,9 @@ pub const Engine = struct {
         width: usize,
         height: usize,
         dpr: f64,
+        constraints: ?WindowConstraints,
     ) void {
-        var metrics = windowMetrics(view_id, width, height, dpr);
+        var metrics = windowMetrics(view_id, width, height, dpr, constraints);
         _ = self.procs.SendWindowMetricsEvent.?(self.handle, &metrics);
     }
 
@@ -318,10 +331,11 @@ pub const Engine = struct {
         width: usize,
         height: usize,
         dpr: f64,
+        constraints: ?WindowConstraints,
         user_data: ?*anyopaque,
         callback: AddViewCallback,
     ) !void {
-        var metrics = windowMetrics(view_id, width, height, dpr);
+        var metrics = windowMetrics(view_id, width, height, dpr, constraints);
         const info: c.FlutterAddViewInfo = .{
             .struct_size = @sizeOf(c.FlutterAddViewInfo),
             .view_id = view_id,
@@ -561,12 +575,27 @@ pub const Engine = struct {
 };
 
 test "window metrics are built for the requested view" {
-    const metrics = windowMetrics(42, 640, 480, 1.5);
+    const metrics = windowMetrics(42, 640, 480, 1.5, null);
     try std.testing.expectEqual(@as(ViewId, 42), metrics.view_id);
     try std.testing.expectEqual(@as(usize, 640), metrics.width);
     try std.testing.expectEqual(@as(usize, 480), metrics.height);
     try std.testing.expectEqual(@as(f64, 1.5), metrics.pixel_ratio);
+    try std.testing.expectEqual(false, metrics.has_constraints);
     try std.testing.expectEqual(@as(usize, @sizeOf(c.FlutterWindowMetricsEvent)), metrics.struct_size);
+}
+
+test "window metrics carry loose constraints when requested" {
+    const metrics = windowMetrics(42, 320, 240, 1.5, .{
+        .min_width = 1,
+        .min_height = 1,
+        .max_width = 16_384,
+        .max_height = 16_384,
+    });
+    try std.testing.expectEqual(true, metrics.has_constraints);
+    try std.testing.expectEqual(@as(usize, 1), metrics.min_width_constraint);
+    try std.testing.expectEqual(@as(usize, 1), metrics.min_height_constraint);
+    try std.testing.expectEqual(@as(usize, 16_384), metrics.max_width_constraint);
+    try std.testing.expectEqual(@as(usize, 16_384), metrics.max_height_constraint);
 }
 
 test "view focus events carry the view, state and direction" {

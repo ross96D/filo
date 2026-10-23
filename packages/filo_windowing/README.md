@@ -6,7 +6,7 @@ This package adapts Flutter's experimental windowing API (Flutter 3.47,
 `RegularWindowController` and friends) to an embedder that can create native
 windows and Flutter views **synchronously**. It ships a native backend for the
 Filo embedder's `filo_window_*` C ABI and owns the framework-side controllers,
-state, delegates, and events. A different embedder can inject its own
+state, delegates, and observer callbacks. A different embedder can inject its own
 `FiloWindowingBackend`.
 
 > **Experimental.** Flutter's windowing API is marked `@internal`, lives in
@@ -49,7 +49,7 @@ import 'package:flutter/src/widgets/_window.dart';
 import 'package:filo_windowing/filo_windowing.dart';
 
 void main() {
-  installFiloWindowing(backend: myBackend);
+  installFiloWindowing();
 
   runWidget(
     RegularWindow(
@@ -93,14 +93,28 @@ See [doc/backend.md](doc/backend.md) for the full contract. In short:
 
 - `createWindow` is synchronous.
 - The returned view id must already resolve to a `FlutterView`.
-- Events are delivered on the UI isolate.
+- The backend invokes `FiloWindowObserver` callbacks synchronously on the UI
+  isolate, and `onDestroy` is the last callback for a window.
 - Compositor close requests are not automatic destroys; the controller's
   delegate decides.
-- The backend must emit `FiloWindowDestroyed` for requested and external
-  destruction.
+- The backend must call `onDestroy` for requested and external destruction.
 
 A fake backend lives under `test/support/` and can be used as a reference for
 implementing another bridge.
+
+## Callbacks
+
+There is no event stream. The native callbacks go straight to the controller:
+
+```
+onClose   -> controller -> delegate.onWindowCloseRequested(this)
+onDestroy -> controller -> delegate.onWindowDestroyed()
+```
+
+`onConfigure`/`onStateChanged`/`onCapabilitiesChanged`/`onMoved`/`onTitleChanged`
+update the controller's cached state and call `notifyListeners()`. Creating a
+window from inside a callback calls back into the engine synchronously; defer it
+with `scheduleMicrotask` or a post-frame callback.
 
 ## Native backend
 
@@ -119,9 +133,9 @@ the embedder.
 | `FiloWindowingOwner` | The `WindowingOwner` implementation |
 | `installFiloWindowing` | Creates, enables, and installs the owner |
 | `FiloWindowingBackend` | Synchronous native bridge |
-| `FiloWindowRequest` / `FiloWindowHandle` | Create request and result |
-| `FiloWindowEvent` and subclasses | Close, destroy, and state events |
-| `FiloWindowPositioner` and related types | Backend-facing positioner values |
+| `FiloWindowRequest` / `FiloWindowHandle` | Create request and initial state |
+| `FiloWindowObserver` | Synchronous per-window callbacks |
+| `FiloPositioner` and related types | Backend-facing positioner values |
 | `FiloWindowingException` | Backend operation failure |
 
 ## Development

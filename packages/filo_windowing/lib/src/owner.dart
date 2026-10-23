@@ -1,6 +1,5 @@
 // ignore_for_file: implementation_imports, invalid_use_of_internal_member
 
-import 'dart:async';
 import 'dart:ui' show FlutterView, Rect, Size;
 
 import 'package:flutter/src/foundation/_features.dart' show isWindowingEnabled;
@@ -10,8 +9,6 @@ import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
 import 'controllers.dart';
-import 'models.dart';
-import 'positioner.dart';
 
 /// A [WindowingOwner] implementation backed by a [FiloWindowingBackend].
 ///
@@ -33,7 +30,6 @@ class FiloWindowingOwner implements WindowingOwner {
       );
     }
     WidgetsFlutterBinding.ensureInitialized();
-    _subscription = backend.events.listen(_dispatch);
   }
 
   /// The native bridge.
@@ -47,15 +43,6 @@ class FiloWindowingOwner implements WindowingOwner {
 
   /// Whether the first regular window may adopt the implicit view (id 0).
   final bool reuseImplicitView;
-
-  final Map<int, _ControllerEntry> _controllers = <int, _ControllerEntry>{};
-  StreamSubscription<FiloWindowEvent>? _subscription;
-
-  /// Stop listening to backend events.
-  void dispose() {
-    _subscription?.cancel();
-    _subscription = null;
-  }
 
   /// Resolves [viewId] to a registered [FlutterView].
   ///
@@ -89,29 +76,16 @@ class FiloWindowingOwner implements WindowingOwner {
     String? title,
   }) {
     _ensureEnabled();
-    final handle = backend.createWindow(
-      FiloWindowRequest(
-        kind: FiloWindowKind.toplevel,
-        size: size,
-        constraints: constraints,
-        resizable: resizable,
-        title: title,
-        preferredViewId: reuseImplicitView ? 0 : -1,
-      ),
-    );
-    final controller = FiloRegularWindowController(
+    return FiloRegularWindowController(
       backend: backend,
       delegate: delegate,
-      handle: handle,
-      view: resolveView(handle.viewId),
+      resolveView: resolveView,
+      size: size,
+      constraints: constraints,
+      resizable: resizable,
+      title: title,
+      reuseImplicitView: reuseImplicitView,
     );
-    _register(
-      viewId: handle.viewId,
-      controller: controller,
-      onCloseRequested: () => delegate.onWindowCloseRequested(controller),
-      onDestroyed: delegate.onWindowDestroyed,
-    );
-    return controller;
   }
 
   @override
@@ -124,31 +98,16 @@ class FiloWindowingOwner implements WindowingOwner {
     String? title,
   }) {
     _ensureEnabled();
-    final handle = backend.createWindow(
-      FiloWindowRequest(
-        kind: FiloWindowKind.toplevel,
-        size: size,
-        constraints: constraints,
-        resizable: resizable,
-        title: title,
-        parentViewId: parent?.rootView.viewId ?? -1,
-        modal: parent != null,
-      ),
-    );
-    final controller = FiloDialogWindowController(
+    return FiloDialogWindowController(
       backend: backend,
       delegate: delegate,
       parent: parent,
-      handle: handle,
-      view: resolveView(handle.viewId),
+      resolveView: resolveView,
+      size: size,
+      constraints: constraints,
+      resizable: resizable,
+      title: title,
     );
-    _register(
-      viewId: handle.viewId,
-      controller: controller,
-      onCloseRequested: () => delegate.onWindowCloseRequested(controller),
-      onDestroyed: delegate.onWindowDestroyed,
-    );
-    return controller;
   }
 
   @override
@@ -160,31 +119,15 @@ class FiloWindowingOwner implements WindowingOwner {
     required BaseWindowController parent,
   }) {
     _ensureEnabled();
-    final handle = backend.createWindow(
-      FiloWindowRequest(
-        kind: FiloWindowKind.popup,
-        constraints: constraints,
-        resizable: false,
-        decorated: false,
-        sizedToContent: true,
-        parentViewId: parent.rootView.viewId,
-        positioner: _toFiloPositioner(positioner, anchorRect, constraints),
-      ),
-    );
-    final controller = FiloTooltipWindowController(
+    return FiloTooltipWindowController(
       backend: backend,
       delegate: delegate,
       parent: parent,
-      handle: handle,
-      view: resolveView(handle.viewId),
+      resolveView: resolveView,
+      constraints: constraints,
+      anchorRect: anchorRect,
+      positioner: positioner,
     );
-    _register(
-      viewId: handle.viewId,
-      controller: controller,
-      onCloseRequested: () {},
-      onDestroyed: delegate.onWindowDestroyed,
-    );
-    return controller;
   }
 
   @override
@@ -196,31 +139,15 @@ class FiloWindowingOwner implements WindowingOwner {
     required BaseWindowController parent,
   }) {
     _ensureEnabled();
-    final handle = backend.createWindow(
-      FiloWindowRequest(
-        kind: FiloWindowKind.popup,
-        constraints: constraints,
-        resizable: false,
-        decorated: false,
-        sizedToContent: true,
-        parentViewId: parent.rootView.viewId,
-        positioner: _toFiloPositioner(positioner, anchorRect, constraints),
-      ),
-    );
-    final controller = FiloPopupWindowController(
+    return FiloPopupWindowController(
       backend: backend,
       delegate: delegate,
       parent: parent,
-      handle: handle,
-      view: resolveView(handle.viewId),
+      resolveView: resolveView,
+      constraints: constraints,
+      anchorRect: anchorRect,
+      positioner: positioner,
     );
-    _register(
-      viewId: handle.viewId,
-      controller: controller,
-      onCloseRequested: () {},
-      onDestroyed: delegate.onWindowDestroyed,
-    );
-    return controller;
   }
 
   @override
@@ -243,37 +170,6 @@ class FiloWindowingOwner implements WindowingOwner {
     );
   }
 
-  void _register({
-    required int viewId,
-    required FiloWindowControllerMixin controller,
-    required void Function() onCloseRequested,
-    required void Function() onDestroyed,
-  }) {
-    _controllers[viewId] = _ControllerEntry(
-      onStateChanged: controller.handleStateChanged,
-      onCloseRequested: onCloseRequested,
-      onDestroyed: () {
-        controller.handleDestroyed();
-        onDestroyed();
-      },
-    );
-  }
-
-  void _dispatch(FiloWindowEvent event) {
-    final entry = _controllers[event.viewId];
-    if (entry == null) return;
-
-    switch (event) {
-      case FiloWindowCloseRequested():
-        entry.onCloseRequested();
-      case FiloWindowDestroyed():
-        _controllers.remove(event.viewId);
-        entry.onDestroyed();
-      case FiloWindowStateChanged():
-        entry.onStateChanged();
-    }
-  }
-
   void _ensureEnabled() {
     if (!isWindowingEnabled) {
       throw StateError(
@@ -282,52 +178,4 @@ class FiloWindowingOwner implements WindowingOwner {
       );
     }
   }
-}
-
-class _ControllerEntry {
-  const _ControllerEntry({
-    required this.onStateChanged,
-    required this.onCloseRequested,
-    required this.onDestroyed,
-  });
-
-  final void Function() onStateChanged;
-  final void Function() onCloseRequested;
-  final void Function() onDestroyed;
-}
-
-FiloPositioner _toFiloPositioner(
-  WindowPositioner positioner,
-  Rect anchorRect,
-  BoxConstraints constraints,
-) {
-  final width = constraints.minWidth.isFinite && constraints.minWidth >= 1
-      ? constraints.minWidth.round()
-      : 1;
-  final height = constraints.minHeight.isFinite && constraints.minHeight >= 1
-      ? constraints.minHeight.round()
-      : 1;
-
-  final adjustment = positioner.constraintAdjustment;
-  var flags = 0;
-  if (adjustment.slideX) flags |= 1;
-  if (adjustment.slideY) flags |= 2;
-  if (adjustment.flipX) flags |= 4;
-  if (adjustment.flipY) flags |= 8;
-  if (adjustment.resizeX) flags |= 16;
-  if (adjustment.resizeY) flags |= 32;
-
-  return FiloPositioner(
-    size: FiloSize(width, height),
-    anchorRect: FiloRect(
-      x: anchorRect.left.round(),
-      y: anchorRect.top.round(),
-      width: anchorRect.width.round(),
-      height: anchorRect.height.round(),
-    ),
-    anchor: FiloPositionerAnchor.values[positioner.parentAnchor.index],
-    gravity: FiloPositionerGravity.values[positioner.childAnchor.index],
-    constrainsAdjustments: FiloPositionerConstrainsAdjustmentsFlags(flags),
-    offset: FiloOffset(positioner.offset.dx.round(), positioner.offset.dy.round()),
-  );
 }

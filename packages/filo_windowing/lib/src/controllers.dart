@@ -9,12 +9,26 @@ import 'package:flutter/src/widgets/_window_positioner.dart';
 
 import 'backend.dart';
 import 'models.dart';
+import 'positioner.dart';
 
 /// Shared state and behaviour for controllers backed by a
 /// [FiloWindowingBackend].
+///
+/// The controller keeps the last state the backend reported. The observer
+/// callbacks update it and notify listeners; `onClose` and `onDestroy` go
+/// straight to the delegate.
 mixin FiloWindowControllerMixin on ChangeNotifier {
   late final FiloWindowingBackend _backend;
   late final int _viewId;
+  late final void Function() _onClose;
+  late final void Function() _onDestroy;
+
+  late Size _contentSize;
+  late String _title;
+  late int _state;
+  late int _capabilities;
+  late Offset _offset;
+
   bool _destroyed = false;
   bool _destroyRequested = false;
 
@@ -22,9 +36,47 @@ mixin FiloWindowControllerMixin on ChangeNotifier {
   void initWindow({
     required FiloWindowingBackend backend,
     required FiloWindowHandle handle,
+    required void Function() onClose,
+    required void Function() onDestroy,
   }) {
     _backend = backend;
     _viewId = handle.viewId;
+    _onClose = onClose;
+    _onDestroy = onDestroy;
+
+    _contentSize = handle.contentSize;
+    _title = handle.title ?? '';
+    _state = handle.toplevelState;
+    _capabilities = handle.wmCapabilities;
+    _offset = handle.offsetFromParent;
+
+    backend.observe(
+      _viewId,
+      FiloWindowObserver(
+        onConfigure: (size) {
+          _contentSize = size;
+          notifyListeners();
+        },
+        onStateChanged: (bits) {
+          _state = bits;
+          notifyListeners();
+        },
+        onCapabilitiesChanged: (bits) {
+          _capabilities = bits;
+          notifyListeners();
+        },
+        onTitleChanged: (title) {
+          _title = title;
+          notifyListeners();
+        },
+        onMoved: (offset) {
+          _offset = offset;
+          notifyListeners();
+        },
+        onClose: _handleClose,
+        onDestroy: _handleDestroy,
+      ),
+    );
   }
 
   FiloWindowingBackend get backend => _backend;
@@ -33,22 +85,18 @@ mixin FiloWindowControllerMixin on ChangeNotifier {
 
   bool get isDestroyed => _destroyed;
 
-  Size get windowContentSize =>
-      _destroyed ? Size.zero : _backend.getSize(_viewId);
+  Size get contentSize => _destroyed ? Size.zero : _contentSize;
 
-  String get windowTitle => _destroyed ? '' : _backend.getTitle(_viewId);
+  String get windowTitle => _destroyed ? '' : _title;
 
-  Set<FiloToplevelState> get windowState =>
-      _destroyed ? const <FiloToplevelState>{} : _backend.getState(_viewId);
+  int get windowState => _destroyed ? 0 : _state;
 
-  Set<FiloToplevelWMCapabilities> get windowCapabilities => _destroyed
-      ? const <FiloToplevelWMCapabilities>{}
-      : _backend.getCapabilities(_viewId);
+  int get windowCapabilities => _destroyed ? 0 : _capabilities;
 
-  Offset get windowOffset =>
-      _destroyed ? Offset.zero : _backend.getOffset(_viewId);
+  Offset get windowOffset => _destroyed ? Offset.zero : _offset;
 
-  Size get contentSize => windowContentSize;
+  bool hasState(FiloToplevelState state) =>
+      !_destroyed && (_state & state.mask) != 0;
 
   void destroy() {
     if (_destroyed || _destroyRequested) return;
@@ -61,17 +109,21 @@ mixin FiloWindowControllerMixin on ChangeNotifier {
     _backend.setConstraints(_viewId, constraints);
   }
 
-  /// The owner calls this when the backend reports a state change.
-  void handleStateChanged() {
-    if (!_destroyed) notifyListeners();
+  /// Update the cached title after a local [setTitle] call.
+  void updateTitle(String title) {
+    _title = title;
+    notifyListeners();
   }
 
-  /// The owner calls this when the backend reports the window is gone.
-  void handleDestroyed() {
+  void _handleClose() {
+    if (!_destroyed) _onClose();
+  }
+
+  void _handleDestroy() {
     if (_destroyed) return;
     _destroyed = true;
     _destroyRequested = true;
-    notifyListeners();
+    _onDestroy();
   }
 }
 
@@ -95,12 +147,37 @@ class FiloRegularWindowController extends RegularWindowController
   FiloRegularWindowController({
     required FiloWindowingBackend backend,
     required RegularWindowControllerDelegate delegate,
-    required FiloWindowHandle handle,
-    required FlutterView view,
+    required FlutterView Function(int viewId) resolveView,
+    Size? size,
+    BoxConstraints? constraints,
+    required bool resizable,
+    String? title,
+    bool reuseImplicitView = true,
   }) : _delegate = delegate,
        super.empty() {
-    initWindow(backend: backend, handle: handle);
-    rootView = view;
+    final handle = backend.createWindow(
+      FiloWindowRequest(
+        kind: FiloWindowKind.toplevel,
+        size: size,
+        constraints: constraints,
+        resizable: resizable,
+        sizedToContent: size == null,
+        title: title,
+        preferredViewId: reuseImplicitView ? 0 : -1,
+      ),
+    );
+    try {
+      rootView = resolveView(handle.viewId);
+      initWindow(
+        backend: backend,
+        handle: handle,
+        onClose: () => _delegate.onWindowCloseRequested(this),
+        onDestroy: _delegate.onWindowDestroyed,
+      );
+    } catch (_) {
+      backend.destroyWindow(handle.viewId);
+      rethrow;
+    }
   }
 
   final RegularWindowControllerDelegate _delegate;
@@ -111,19 +188,16 @@ class FiloRegularWindowController extends RegularWindowController
   String get title => windowTitle;
 
   @override
-  bool get isActivated =>
-      windowState.contains(FiloToplevelState.activated);
+  bool get isActivated => hasState(FiloToplevelState.activated);
 
   @override
-  bool get isMaximized =>
-      windowState.contains(FiloToplevelState.maximized);
+  bool get isMaximized => hasState(FiloToplevelState.maximized);
 
   @override
   bool get isMinimized => false;
 
   @override
-  bool get isFullscreen =>
-      windowState.contains(FiloToplevelState.fullscreen);
+  bool get isFullscreen => hasState(FiloToplevelState.fullscreen);
 
   @override
   void setSize(Size size) {
@@ -134,7 +208,7 @@ class FiloRegularWindowController extends RegularWindowController
   void setTitle(String title) {
     if (isDestroyed) return;
     backend.setTitle(viewId, title);
-    notifyListeners();
+    updateTitle(title);
   }
 
   @override
@@ -167,12 +241,37 @@ class FiloDialogWindowController extends DialogWindowController
     required FiloWindowingBackend backend,
     required DialogWindowControllerDelegate delegate,
     required this.parent,
-    required FiloWindowHandle handle,
-    required FlutterView view,
+    required FlutterView Function(int viewId) resolveView,
+    Size? size,
+    BoxConstraints? constraints,
+    required bool resizable,
+    String? title,
   }) : _delegate = delegate,
        super.empty() {
-    initWindow(backend: backend, handle: handle);
-    rootView = view;
+    final handle = backend.createWindow(
+      FiloWindowRequest(
+        kind: FiloWindowKind.toplevel,
+        size: size,
+        constraints: constraints,
+        resizable: resizable,
+        sizedToContent: size == null,
+        title: title,
+        parentViewId: parent?.rootView.viewId ?? -1,
+        modal: parent != null,
+      ),
+    );
+    try {
+      rootView = resolveView(handle.viewId);
+      initWindow(
+        backend: backend,
+        handle: handle,
+        onClose: () => _delegate.onWindowCloseRequested(this),
+        onDestroy: _delegate.onWindowDestroyed,
+      );
+    } catch (_) {
+      backend.destroyWindow(handle.viewId);
+      rethrow;
+    }
   }
 
   final DialogWindowControllerDelegate _delegate;
@@ -186,8 +285,7 @@ class FiloDialogWindowController extends DialogWindowController
   String get title => windowTitle;
 
   @override
-  bool get isActivated =>
-      windowState.contains(FiloToplevelState.activated);
+  bool get isActivated => hasState(FiloToplevelState.activated);
 
   @override
   bool get isMinimized => false;
@@ -201,7 +299,7 @@ class FiloDialogWindowController extends DialogWindowController
   void setTitle(String title) {
     if (isDestroyed) return;
     backend.setTitle(viewId, title);
-    notifyListeners();
+    updateTitle(title);
   }
 
   @override
@@ -222,12 +320,35 @@ class FiloTooltipWindowController extends TooltipWindowController
     required FiloWindowingBackend backend,
     required TooltipWindowControllerDelegate delegate,
     required this.parent,
-    required FiloWindowHandle handle,
-    required FlutterView view,
+    required FlutterView Function(int viewId) resolveView,
+    required BoxConstraints constraints,
+    required Rect anchorRect,
+    required WindowPositioner positioner,
   }) : _delegate = delegate,
        super.empty() {
-    initWindow(backend: backend, handle: handle);
-    rootView = view;
+    final handle = backend.createWindow(
+      FiloWindowRequest(
+        kind: FiloWindowKind.popup,
+        constraints: constraints,
+        resizable: false,
+        decorated: false,
+        sizedToContent: true,
+        parentViewId: parent.rootView.viewId,
+        positioner: _toFiloPositioner(positioner, anchorRect, constraints),
+      ),
+    );
+    try {
+      rootView = resolveView(handle.viewId);
+      initWindow(
+        backend: backend,
+        handle: handle,
+        onClose: destroy,
+        onDestroy: _delegate.onWindowDestroyed,
+      );
+    } catch (_) {
+      backend.destroyWindow(handle.viewId);
+      rethrow;
+    }
   }
 
   final TooltipWindowControllerDelegate _delegate;
@@ -245,12 +366,35 @@ class FiloPopupWindowController extends PopupWindowController
     required FiloWindowingBackend backend,
     required PopupWindowControllerDelegate delegate,
     required this.parent,
-    required FiloWindowHandle handle,
-    required FlutterView view,
+    required FlutterView Function(int viewId) resolveView,
+    required BoxConstraints constraints,
+    required Rect anchorRect,
+    required WindowPositioner positioner,
   }) : _delegate = delegate,
        super.empty() {
-    initWindow(backend: backend, handle: handle);
-    rootView = view;
+    final handle = backend.createWindow(
+      FiloWindowRequest(
+        kind: FiloWindowKind.popup,
+        constraints: constraints,
+        resizable: false,
+        decorated: false,
+        sizedToContent: true,
+        parentViewId: parent.rootView.viewId,
+        positioner: _toFiloPositioner(positioner, anchorRect, constraints),
+      ),
+    );
+    try {
+      rootView = resolveView(handle.viewId);
+      initWindow(
+        backend: backend,
+        handle: handle,
+        onClose: destroy,
+        onDestroy: _delegate.onWindowDestroyed,
+      );
+    } catch (_) {
+      backend.destroyWindow(handle.viewId);
+      rethrow;
+    }
   }
 
   final PopupWindowControllerDelegate _delegate;
@@ -259,4 +403,43 @@ class FiloPopupWindowController extends PopupWindowController
   final BaseWindowController parent;
 
   PopupWindowControllerDelegate get delegate => _delegate;
+}
+
+FiloPositioner _toFiloPositioner(
+  WindowPositioner positioner,
+  Rect anchorRect,
+  BoxConstraints constraints,
+) {
+  final width = constraints.minWidth.isFinite && constraints.minWidth >= 1
+      ? constraints.minWidth.round()
+      : 1;
+  final height = constraints.minHeight.isFinite && constraints.minHeight >= 1
+      ? constraints.minHeight.round()
+      : 1;
+
+  final adjustment = positioner.constraintAdjustment;
+  var flags = 0;
+  if (adjustment.slideX) flags |= 1;
+  if (adjustment.slideY) flags |= 2;
+  if (adjustment.flipX) flags |= 4;
+  if (adjustment.flipY) flags |= 8;
+  if (adjustment.resizeX) flags |= 16;
+  if (adjustment.resizeY) flags |= 32;
+
+  return FiloPositioner(
+    size: FiloSize(width, height),
+    anchorRect: FiloRect(
+      x: anchorRect.left.round(),
+      y: anchorRect.top.round(),
+      width: anchorRect.width.round(),
+      height: anchorRect.height.round(),
+    ),
+    anchor: FiloPositionerAnchor.values[positioner.parentAnchor.index],
+    gravity: FiloPositionerGravity.values[positioner.childAnchor.index],
+    constrainsAdjustments: FiloPositionerConstrainsAdjustmentsFlags(flags),
+    offset: FiloOffset(
+      positioner.offset.dx.round(),
+      positioner.offset.dy.round(),
+    ),
+  );
 }

@@ -31,17 +31,17 @@ may create a new view and return another id.
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | Regular, dialog, tooltip, popup, or satellite |
+| `kind` | `toplevel` or `popup` |
 | `size` | Preferred logical content size; null means size to content |
 | `constraints` | Logical min/max size constraints |
 | `resizable` | Whether the user may resize after creation |
+| `sizedToContent` | Hint that the window should track its content |
+| `modal` | Whether a dialog is modal to `parentViewId` |
+| `decorated` | Whether the window has decorations |
 | `title` | Initial title |
-| `parentViewId` | Parent window view id, if any |
-| `preferredViewId` | Suggested view id to adopt (usually 0) |
-| `anchorRect` | Tooltip/popup anchor in parent logical coordinates |
-| `positioner` | Tooltip/popup placement |
-| `initialAnchorRect` | Satellite initial anchor |
-| `initialPositioner` | Satellite initial placement |
+| `parentViewId` | Parent window view id, or -1 |
+| `preferredViewId` | Suggested view id to adopt (usually 0), or -1 |
+| `positioner` | Popup/tooltip placement, including its anchor rect |
 
 All `Size`, `Rect`, and `Offset` values are **logical pixels**. Convert to
 physical or native coordinates in the backend using the view's device pixel
@@ -50,22 +50,48 @@ ratio.
 ## Handle fields
 
 `FiloWindowHandle` carries the initial state so the controller can be fully
-initialized before any event is delivered:
+initialized before any callback is delivered:
 
 - `viewId`
-- `kind`
 - `contentSize`
 - `title`
-- `isActivated`
-- `isMaximized`
-- `isMinimized`
-- `isFullscreen`
+- `toplevelState` (the `xdg_toplevel.state` bitmask)
+- `wmCapabilities` (the `xdg_toplevel.wm_capabilities` bitmask)
 - `offsetFromParent` (popups)
 
-Do not emit events for a new window during `createWindow`; return the initial
-state in the handle instead. Events may be emitted after `createWindow` returns,
-but not synchronously from inside it: the owner registers the controller only
-after the call returns.
+Do not invoke observer callbacks for a new window during `createWindow`; return
+the initial state in the handle instead. Callbacks may be invoked once
+`observe` has returned.
+
+## Observing a window
+
+```dart
+void observe(int viewId, FiloWindowObserver observer);
+```
+
+`observe` registers the callbacks for a window returned by `createWindow`. The
+controller calls it immediately after construction, before the current UI task
+returns.
+
+The callbacks are invoked **synchronously on the UI isolate**, on the thread
+that owns the windowing loop. `FiloWindowObserver` carries the values:
+
+| Callback | Meaning |
+| --- | --- |
+| `onConfigure(Size)` | The compositor configured a new logical content size |
+| `onStateChanged(int)` | The `xdg_toplevel.state` bitmask changed |
+| `onCapabilitiesChanged(int)` | The `xdg_toplevel.wm_capabilities` bitmask changed |
+| `onTitleChanged(String)` | The title changed |
+| `onMoved(Offset)` | A popup moved, relative to its parent |
+| `onClose()` | A close was requested; the window is still alive |
+| `onDestroy()` | The native window and its Flutter view are gone |
+
+`onDestroy` is the last callback for a window; after it returns the backend may
+release the native callables.
+
+Creating a window from inside a callback calls back into the engine
+synchronously. Defer it with `scheduleMicrotask` or a post-frame callback.
+`destroyWindow`, `setTitle`, `setSize`, and `notifyListeners` are safe.
 
 ## Synchronous operations
 
@@ -84,17 +110,14 @@ The remaining methods are also synchronous:
 
 They may enqueue native work, but they must not return a controller or a view id
 that is not yet usable. For state that the compositor controls (maximized,
-minimized, fullscreen, actual content size), report the real state through
-events.
+minimized, fullscreen, actual content size), report the real state through the
+observer.
 
 `destroyWindow` must be idempotent.
 
-## Events
+## Close and destroy
 
-Events are emitted on `FiloWindowingBackend.events` and must be delivered on the
-UI isolate.
-
-### `FiloWindowCloseRequested`
+### `onClose`
 
 The user or compositor asked the window to close. The package forwards this to
 the controller's delegate. The backend must keep the window alive until Dart
@@ -103,9 +126,9 @@ calls `destroyWindow`.
 The default delegates destroy immediately; an application can override them to
 save state or cancel the close.
 
-### `FiloWindowDestroyed`
+### `onDestroy`
 
-The native window and its Flutter view are gone. Emit this for:
+The native window and its Flutter view are gone. Invoke this for:
 
 - destruction requested through `destroyWindow`
 - external destruction
@@ -113,15 +136,6 @@ The native window and its Flutter view are gone. Emit this for:
 
 The controller marks itself destroyed and calls its delegate's
 `onWindowDestroyed` exactly once.
-
-### `FiloWindowStateChanged`
-
-Fields that are null did not change. Emit this for title changes, activation
-changes, maximized/minimized/fullscreen changes, content-size changes, and popup
-offset changes.
-
-For a popup, `offsetFromParent` is the popup's top-left corner relative to the
-parent window's client area, in logical coordinates.
 
 ## Parent and child windows
 
@@ -132,14 +146,14 @@ The backend owns the native parent relationship:
 - satellites receive `parentViewId` and may later receive `setParent`
 
 When a parent is destroyed, the backend must destroy its dependent children and
-emit `FiloWindowDestroyed` for each of them. The package does not duplicate that
-cascade in Dart.
+invoke `onDestroy` for each of them. The package does not duplicate that cascade
+in Dart.
 
 ## Threading
 
-All backend methods are called on the UI isolate. Events must be added to the
-stream on the UI isolate. If the native bridge receives callbacks on another
-thread, marshal them to the UI isolate before adding an event.
+All backend methods and observer callbacks run on the UI isolate. If the native
+bridge receives callbacks on another thread, marshal them to the UI isolate
+before invoking the observer.
 
 ## Error handling
 

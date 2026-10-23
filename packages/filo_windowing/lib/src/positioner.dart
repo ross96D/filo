@@ -87,7 +87,8 @@ class FiloPositioner {
       anchorRect: anchorRect ?? this.anchorRect,
       anchor: anchor ?? this.anchor,
       gravity: gravity ?? this.gravity,
-      constrainsAdjustments: constrainsAdjustments ?? this.constrainsAdjustments,
+      constrainsAdjustments:
+          constrainsAdjustments ?? this.constrainsAdjustments,
       offset: offset ?? this.offset,
     );
   }

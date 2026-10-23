@@ -123,7 +123,10 @@ final class _WindowHandle extends Struct {
 @Native<Int32 Function(Pointer<_WindowRequest>, Pointer<_WindowHandle>)>(
   symbol: 'filo_window_create',
 )
-external int _create(Pointer<_WindowRequest> request, Pointer<_WindowHandle> out);
+external int _create(
+  Pointer<_WindowRequest> request,
+  Pointer<_WindowHandle> out,
+);
 
 @Native<Int32 Function(Int64)>(symbol: 'filo_window_destroy')
 external int _destroy(int viewId);
@@ -157,8 +160,16 @@ external int _setTitle(int viewId, Pointer<Utf8> title);
 @Native<Int32 Function(Int64, Int32, Int32)>(symbol: 'filo_window_set_size')
 external int _setSize(int viewId, int width, int height);
 
-@Native<Int32 Function(Int64, Int32, Int32, Int32, Int32)>(symbol: 'filo_window_set_constraints')
-external int _setConstraints(int viewId, int minWidth, int minHeight, int maxWidth, int maxHeight);
+@Native<Int32 Function(Int64, Int32, Int32, Int32, Int32)>(
+  symbol: 'filo_window_set_constraints',
+)
+external int _setConstraints(
+  int viewId,
+  int minWidth,
+  int minHeight,
+  int maxWidth,
+  int maxHeight,
+);
 
 @Native<Int32 Function(Int64)>(symbol: 'filo_window_activate')
 external int _activate(int viewId);
@@ -178,22 +189,11 @@ external int _setParent(int viewId, int parentViewId);
 @Native<Int32 Function(Int64, Pointer<_Rect>, Pointer<_Positioner>)>(
   symbol: 'filo_window_update_position',
 )
-external int _updatePosition(int viewId, Pointer<_Rect> anchor, Pointer<_Positioner> positioner);
-
-@Native<Int32 Function(Int64, Pointer<_Size>)>(symbol: 'filo_window_get_size')
-external int _getSize(int viewId, Pointer<_Size> out);
-
-@Native<Int32 Function(Int64, Pointer<Uint32>)>(symbol: 'filo_window_get_state')
-external int _getState(int viewId, Pointer<Uint32> out);
-
-@Native<Int32 Function(Int64, Pointer<Uint32>)>(symbol: 'filo_window_get_capabilities')
-external int _getCapabilities(int viewId, Pointer<Uint32> out);
-
-@Native<Int32 Function(Int64, Pointer<Uint8>, Uint32)>(symbol: 'filo_window_get_title')
-external int _getTitle(int viewId, Pointer<Uint8> buffer, int length);
-
-@Native<Int32 Function(Int64, Pointer<_Offset>)>(symbol: 'filo_window_get_offset')
-external int _getOffset(int viewId, Pointer<_Offset> out);
+external int _updatePosition(
+  int viewId,
+  Pointer<_Rect> anchor,
+  Pointer<_Positioner> positioner,
+);
 
 //------------------------------------------------------------------------------
 // Native backend
@@ -202,19 +202,15 @@ external int _getOffset(int viewId, Pointer<_Offset> out);
 /// The [FiloWindowingBackend] backed by the `filo_window_*` symbols the Filo
 /// embedder exports from the process image.
 class FiloNativeBackend implements FiloWindowingBackend {
-  final StreamController<FiloWindowEvent> _events = StreamController<FiloWindowEvent>.broadcast(
-    sync: true,
-  );
   final Map<int, _WindowRecord> _windows = <int, _WindowRecord>{};
-
-  @override
-  Stream<FiloWindowEvent> get events => _events.stream;
 
   @override
   FiloWindowHandle createWindow(FiloWindowRequest request) {
     final requestPtr = calloc<_WindowRequest>();
     final handlePtr = calloc<_WindowHandle>();
-    final titlePtr = request.title == null ? nullptr : request.title!.toNativeUtf8();
+    final titlePtr = request.title == null
+        ? nullptr
+        : request.title!.toNativeUtf8();
     try {
       final ref = requestPtr.ref;
       ref.kind = request.kind.index;
@@ -236,46 +232,62 @@ class FiloNativeBackend implements FiloWindowingBackend {
       _check(_create(requestPtr, handlePtr), 'createWindow');
 
       final viewId = handlePtr.ref.viewId;
-      final handle = FiloWindowHandle(
+      _windows[viewId] = _WindowRecord(
+        positioner: request.positioner ?? _defaultPositioner(request.size),
+      );
+
+      return FiloWindowHandle(
         viewId: viewId,
         contentSize: Size(
           handlePtr.ref.contentSize.width.toDouble(),
           handlePtr.ref.contentSize.height.toDouble(),
         ),
-        title: handlePtr.ref.title == nullptr ? null : handlePtr.ref.title.toDartString(),
-        toplevelState: _stateSet(handlePtr.ref.toplevelState),
-        wmCapabilities: _capabilitySet(handlePtr.ref.wmCapabilities),
+        title: handlePtr.ref.title == nullptr
+            ? null
+            : handlePtr.ref.title.toDartString(),
+        toplevelState: handlePtr.ref.toplevelState,
+        wmCapabilities: handlePtr.ref.wmCapabilities,
         offsetFromParent: Offset(
           handlePtr.ref.offsetFromParent.x.toDouble(),
           handlePtr.ref.offsetFromParent.y.toDouble(),
         ),
       );
-
-      final observer = _Observer(this, viewId);
-      _check(
-        _observe(
-          viewId,
-          observer._onConfigure.nativeFunction,
-          observer._onState.nativeFunction,
-          observer._onCapabilities.nativeFunction,
-          observer._onTitle.nativeFunction,
-          observer._onMoved.nativeFunction,
-          observer._onClose.nativeFunction,
-          observer._onDestroy.nativeFunction,
-        ),
-        'observe',
-      );
-
-      _windows[viewId] = _WindowRecord(
-        observer: observer,
-        positioner: request.positioner ?? _defaultPositioner(request.size),
-      );
-      return handle;
     } finally {
       if (titlePtr != nullptr) malloc.free(titlePtr);
       calloc.free(requestPtr);
       calloc.free(handlePtr);
     }
+  }
+
+  @override
+  void observe(int viewId, FiloWindowObserver observer) {
+    final record = _windows[viewId];
+    if (record == null) {
+      throw const FiloWindowingException('observe failed: unknown view');
+    }
+
+    final callbacks = _Observer(this, viewId, observer);
+    try {
+      _check(
+        _observe(
+          viewId,
+          callbacks._onConfigure.nativeFunction,
+          callbacks._onState.nativeFunction,
+          callbacks._onCapabilities.nativeFunction,
+          callbacks._onTitle.nativeFunction,
+          callbacks._onMoved.nativeFunction,
+          callbacks._onClose.nativeFunction,
+          callbacks._onDestroy.nativeFunction,
+        ),
+        'observe',
+      );
+    } catch (_) {
+      callbacks.close();
+      rethrow;
+    }
+
+    record.observer?.close();
+    record.observer = callbacks;
   }
 
   @override
@@ -295,7 +307,10 @@ class FiloNativeBackend implements FiloWindowingBackend {
 
   @override
   void setSize(int viewId, Size size) {
-    _check(_setSize(viewId, _dimension(size.width), _dimension(size.height)), 'setSize');
+    _check(
+      _setSize(viewId, _dimension(size.width), _dimension(size.height)),
+      'setSize',
+    );
   }
 
   @override
@@ -338,7 +353,11 @@ class FiloNativeBackend implements FiloWindowingBackend {
   }
 
   @override
-  void updatePosition(int viewId, {Rect? anchorRect, WindowPositioner? positioner}) {
+  void updatePosition(
+    int viewId, {
+    Rect? anchorRect,
+    WindowPositioner? positioner,
+  }) {
     final record = _windows[viewId];
     if (record == null) return;
 
@@ -347,8 +366,13 @@ class FiloNativeBackend implements FiloWindowingBackend {
       current = current.copyWith(
         anchor: FiloPositionerAnchor.values[positioner.parentAnchor.index],
         gravity: FiloPositionerGravity.values[positioner.childAnchor.index],
-        constrainsAdjustments: _constraintAdjustment(positioner.constraintAdjustment),
-        offset: FiloOffset(positioner.offset.dx.round(), positioner.offset.dy.round()),
+        constrainsAdjustments: _constraintAdjustment(
+          positioner.constraintAdjustment,
+        ),
+        offset: FiloOffset(
+          positioner.offset.dx.round(),
+          positioner.offset.dy.round(),
+        ),
       );
     }
     if (anchorRect != null) {
@@ -372,111 +396,58 @@ class FiloNativeBackend implements FiloWindowingBackend {
     }
   }
 
-  @override
-  Size getSize(int viewId) {
-    final out = calloc<_Size>();
-    try {
-      _check(_getSize(viewId, out), 'getSize');
-      return Size(out.ref.width.toDouble(), out.ref.height.toDouble());
-    } finally {
-      calloc.free(out);
-    }
-  }
-
-  @override
-  Set<FiloToplevelState> getState(int viewId) {
-    final out = calloc<Uint32>();
-    try {
-      _check(_getState(viewId, out), 'getState');
-      return _stateSet(out.value);
-    } finally {
-      calloc.free(out);
-    }
-  }
-
-  @override
-  Set<FiloToplevelWMCapabilities> getCapabilities(int viewId) {
-    final out = calloc<Uint32>();
-    try {
-      _check(_getCapabilities(viewId, out), 'getCapabilities');
-      return _capabilitySet(out.value);
-    } finally {
-      calloc.free(out);
-    }
-  }
-
-  @override
-  String getTitle(int viewId) {
-    final buffer = calloc<Uint8>(512);
-    try {
-      _check(_getTitle(viewId, buffer, 512), 'getTitle');
-      return buffer.cast<Utf8>().toDartString();
-    } finally {
-      calloc.free(buffer);
-    }
-  }
-
-  @override
-  Offset getOffset(int viewId) {
-    final out = calloc<_Offset>();
-    try {
-      _check(_getOffset(viewId, out), 'getOffset');
-      return Offset(out.ref.x.toDouble(), out.ref.y.toDouble());
-    } finally {
-      calloc.free(out);
-    }
-  }
-
-  void _emit(FiloWindowEvent event) {
-    if (!_events.isClosed) _events.add(event);
-  }
-
   void _forget(int viewId) {
     final record = _windows.remove(viewId);
-    record?.observer.close();
+    record?.observer?.close();
   }
 }
 
 class _WindowRecord {
-  _WindowRecord({required this.observer, required this.positioner});
+  _WindowRecord({required this.positioner});
 
-  final _Observer observer;
   FiloPositioner positioner;
+  _Observer? observer;
 }
 
 /// Keeps the Dart callbacks alive for the lifetime of one window.
 class _Observer {
-  _Observer(FiloNativeBackend backend, int viewId)
+  _Observer(FiloNativeBackend backend, int viewId, FiloWindowObserver observer)
     : _onConfigure = NativeCallable<Void Function(Int32, Int32)>.isolateLocal((
         int width,
         int height,
       ) {
-        backend._emit(
-          FiloWindowStateChanged(viewId, contentSize: Size(width.toDouble(), height.toDouble())),
-        );
+        observer.onConfigure?.call(Size(width.toDouble(), height.toDouble()));
       }),
       _onState = NativeCallable<Void Function(Uint32)>.isolateLocal((int bits) {
-        backend._emit(FiloWindowStateChanged(viewId, toplevelState: _stateSet(bits)));
+        observer.onStateChanged?.call(bits);
       }),
-      _onCapabilities = NativeCallable<Void Function(Uint32)>.isolateLocal((int bits) {
-        backend._emit(FiloWindowStateChanged(viewId, wmCapabilities: _capabilitySet(bits)));
+      _onCapabilities = NativeCallable<Void Function(Uint32)>.isolateLocal((
+        int bits,
+      ) {
+        observer.onCapabilitiesChanged?.call(bits);
       }),
-      _onTitle = NativeCallable<Void Function(Pointer<Utf8>)>.isolateLocal((Pointer<Utf8> title) {
-        backend._emit(FiloWindowStateChanged(viewId, title: title.toDartString()));
+      _onTitle = NativeCallable<Void Function(Pointer<Utf8>)>.isolateLocal((
+        Pointer<Utf8> title,
+      ) {
+        observer.onTitleChanged?.call(title.toDartString());
       }),
-      _onMoved = NativeCallable<Void Function(Int32, Int32)>.isolateLocal((int x, int y) {
-        backend._emit(
-          FiloWindowStateChanged(viewId, offsetFromParent: Offset(x.toDouble(), y.toDouble())),
-        );
+      _onMoved = NativeCallable<Void Function(Int32, Int32)>.isolateLocal((
+        int x,
+        int y,
+      ) {
+        observer.onMoved?.call(Offset(x.toDouble(), y.toDouble()));
       }),
       _onClose = NativeCallable<Void Function()>.isolateLocal(() {
-        backend._emit(FiloWindowCloseRequested(viewId));
+        observer.onClose?.call();
       }),
       _onDestroy = NativeCallable<Void Function()>.isolateLocal(() {
-        backend._emit(FiloWindowDestroyed(viewId));
-        // The native callback is still on the stack; close the callables after
-        // it returns.
-        scheduleMicrotask(() => backend._forget(viewId));
+        try {
+          observer.onDestroy?.call();
+        } finally {
+          // The native callback is still on the stack; release the callables
+          // after it returns.
+          scheduleMicrotask(() => backend._forget(viewId));
+        }
       });
 
   final NativeCallable<Void Function(Int32, Int32)> _onConfigure;
@@ -519,7 +490,10 @@ void _writePositioner(_Positioner out, FiloPositioner? positioner) {
 
 FiloPositioner _defaultPositioner(Size? size) {
   return FiloPositioner(
-    size: FiloSize(_atLeastOne(size?.width.round() ?? 1), _atLeastOne(size?.height.round() ?? 1)),
+    size: FiloSize(
+      _atLeastOne(size?.width.round() ?? 1),
+      _atLeastOne(size?.height.round() ?? 1),
+    ),
     anchorRect: FiloRect(x: 0, y: 0, width: 1, height: 1),
   );
 }
@@ -535,22 +509,6 @@ FiloPositionerConstrainsAdjustmentsFlags _constraintAdjustment(
   if (adjustment.resizeX) value |= 16;
   if (adjustment.resizeY) value |= 32;
   return FiloPositionerConstrainsAdjustmentsFlags(value);
-}
-
-Set<FiloToplevelState> _stateSet(int bits) {
-  final result = <FiloToplevelState>{};
-  for (var i = 0; i < FiloToplevelState.values.length; i++) {
-    if ((bits & (1 << i)) != 0) result.add(FiloToplevelState.values[i]);
-  }
-  return result;
-}
-
-Set<FiloToplevelWMCapabilities> _capabilitySet(int bits) {
-  final result = <FiloToplevelWMCapabilities>{};
-  for (var i = 0; i < FiloToplevelWMCapabilities.values.length; i++) {
-    if ((bits & (1 << i)) != 0) result.add(FiloToplevelWMCapabilities.values[i]);
-  }
-  return result;
 }
 
 int _dimension(double? value) => _constraint(value);
