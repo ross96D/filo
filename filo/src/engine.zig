@@ -177,6 +177,9 @@ pub const Engine = struct {
         /// engine can ask for a frame before `init` has returned.
         self_slot: *std.atomic.Value(?*Engine),
         platform_message_callback: c.FlutterPlatformMessageCallback,
+        /// Called on a hot restart, before the Dart isolate is torn down. The
+        /// embedder uses it to drop the callbacks that belong to that isolate.
+        on_pre_engine_restart_callback: c.OnPreEngineRestartCallback,
         vsync_callback: c.VsyncCallback,
         /// Called when the framework wants the native view focus changed, for
         /// example after a focus traversal or a programmatic focus request.
@@ -267,6 +270,10 @@ pub const Engine = struct {
         args.custom_task_runners = &self.custom_task_runners;
         args.shutdown_dart_vm_when_done = true;
         args.platform_message_callback = platform_message_callback;
+        // A hot restart destroys the Dart isolate, so every `NativeCallable`
+        // the windowing package registered points into freed code afterwards.
+        // The callback lets the embedder clear them before that happens.
+        args.on_pre_engine_restart_callback = on_pre_engine_restart_callback;
         // Without this the engine paces itself with a hardcoded 60 Hz fallback,
         // no matter what the display can do.
         args.vsync_callback = vsync_callback;

@@ -444,6 +444,37 @@ pub const App = struct {
         self.views_by_surface.deinit(self.ctx.allocator);
     }
 
+    /// A hot restart destroys the Dart isolate. Every `View` still points at
+    /// `NativeCallable`s registered by that isolate, and calling one afterwards
+    /// jumps into unmapped code. Drop them before the engine tears the isolate
+    /// down, then put the window layout back to what it is at start-up: keep
+    /// the implicit view for the new isolate to adopt and remove the windows
+    /// the old isolate created, which the new isolate has no handles for.
+    fn resetForRestart(self: *App) void {
+        self.implicit_adopted = false;
+
+        var orphaned: usize = 0;
+        for (self.views.items) |view| {
+            // Views without an observer were created by the embedder itself
+            // (the implicit view or `FILO_EXTRA_WINDOWS`), not by the old
+            // isolate, so there is no stale callback to drop and nothing to
+            // close.
+            const dart_owned = !view.callbacks.isEmpty();
+            view.callbacks = windowing.empty_callbacks;
+            if (view.id == 0) {
+                continue;
+            }
+            if (!dart_owned) continue;
+
+            orphaned += 1;
+            view.destroy_requested = true;
+        }
+        std.debug.print(
+            "filo: hot restart; cleared callbacks, closing {} orphaned window(s)\n",
+            .{orphaned},
+        );
+    }
+
     /// Queue a view-operation result for the Wayland/Vulkan thread. The engine
     /// callbacks run on its own thread; nothing here may touch a surface.
     fn postViewOp(self: *App, op: *ViewOp) void {
@@ -1279,6 +1310,14 @@ pub fn platformMessageCallback(
 ) callconv(.c) void {
     const app: *App = @ptrCast(@alignCast(user_data.?));
     app.channels.handle(message);
+}
+
+/// Invoked by the engine right before a hot restart. The Dart isolate that
+/// registered the window callbacks is about to go away; clear them so no
+/// native event can call into it afterwards.
+pub fn onPreEngineRestart(user_data: ?*anyopaque) callconv(.c) void {
+    const app: *App = @ptrCast(@alignCast(user_data.?));
+    app.resetForRestart();
 }
 
 /// Invoked by the engine on its raster thread when it wants to start a frame at

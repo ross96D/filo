@@ -149,6 +149,7 @@ pub const Runtime = struct {
             &self.app,
             &self.app.engine,
             app_mod.platformMessageCallback,
+            app_mod.onPreEngineRestart,
             app_mod.vsyncCallback,
             app_mod.viewFocusChangeRequestCallback,
         );
