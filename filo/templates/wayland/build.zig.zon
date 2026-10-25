@@ -1,9 +1,12 @@
 .{
     .name = .filo_wayland_host,
     .version = "0.0.0",
-    .fingerprint = 0x7b721435d0544b1c,
+    .fingerprint = 0xabcdef0123456789,
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{},
+    .dependencies = .{ .filo = .{
+        .url = "git+https://github.com/ross96D/filo#<commit>",
+        .hash = "<hash>",
+    } },
     .paths = .{
         "build.zig",
         "build.zig.zon",

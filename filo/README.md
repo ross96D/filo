@@ -18,7 +18,7 @@ installed artifact.
 Add the package to the host's `build.zig.zon`:
 
 ```sh
-zig fetch --save=filo git+https://example.com/filo#<commit>
+zig fetch --save=filo git+https://github.com/ross96D/filo#master
 ```
 
 Or use a local checkout while developing:
@@ -63,18 +63,18 @@ it is enough.
 
 `filo.Config` is the host-facing configuration:
 
-| Field | Meaning |
-| --- | --- |
-| `engine_lib` | Path to `libflutter_engine.so` |
-| `icu_data` | Path to `icudtl.dat` |
-| `assets` | Path to the application's `flutter_assets` directory |
-| `aot_lib` | Optional path to the AOT `libapp.so`; JIT when null |
-| `force_impeller` | Use Impeller instead of Skia (expected to fail with the compositor path) |
-| `vulkan_validation` | Enable the Vulkan validation layer when installed |
-| `trace` | Print per-frame synchronization timings |
-| `extra_windows` | Open this many extra test views at startup |
-| `windowing_spike` | Exercise the exported windowing ABI from the event loop |
-| `engine_args` | Extra engine switches, e.g. Flutter's `${engineOptions}` |
+| Field               | Meaning                                                                  |
+| ------------------- | ------------------------------------------------------------------------ |
+| `engine_lib`        | Path to `libflutter_engine.so`                                           |
+| `icu_data`          | Path to `icudtl.dat`                                                     |
+| `assets`            | Path to the application's `flutter_assets` directory                     |
+| `aot_lib`           | Optional path to the AOT `libapp.so`; JIT when null                      |
+| `force_impeller`    | Use Impeller instead of Skia (expected to fail with the compositor path) |
+| `vulkan_validation` | Enable the Vulkan validation layer when installed                        |
+| `trace`             | Print per-frame synchronization timings                                  |
+| `extra_windows`     | Open this many extra test views at startup                               |
+| `windowing_spike`   | Exercise the exported windowing ABI from the event loop                  |
+| `engine_args`       | Extra engine switches, e.g. Flutter's `${engineOptions}`                 |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
