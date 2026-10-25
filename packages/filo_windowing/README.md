@@ -82,10 +82,72 @@ a client no way to position or move an `xdg_toplevel`, so the satellite contract
 (initial positioner, relative offset tracking, reparenting without moving)
 cannot be honoured on Wayland.
 
+### Layer windows
+
+A layer window is a `zwlr_layer_shell_v1` surface: a bar, wallpaper, overlay, or
+notification panel that the compositor places on an output according to its
+layer, anchors, margins, and exclusive zone. Flutter's windowing API has no
+layer type, so this package adds `FiloLayerWindowController` (a
+`RegularWindowController` subtype) and the `FiloLayerWindow` widget. Construct
+the controller through `FiloWindowingOwner.createLayerWindowController`; it does
+not adopt the implicit view.
+
+```dart
+final owner = installFiloWindowing();
+
+final panel = owner.createLayerWindowController(
+  delegate: MyDelegate(),
+  layerSurface: FiloLayerSurface(
+    layer: FiloLayer.top,
+    anchors:
+        FiloLayerAnchors.top |
+        FiloLayerAnchors.left |
+        FiloLayerAnchors.right,
+    exclusiveZone: 32,
+    keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
+    margin: const FiloInsets(top: 4, left: 8, right: 8),
+    namespace: 'my-panel',
+  ),
+  // Zero width lets the compositor stretch the panel between the anchors;
+  // a fixed height keeps it a bar.
+  size: const Size(0, 32),
+);
+
+runWidget(
+  ViewCollection(
+    views: [
+      FiloLayerWindow(controller: panel, child: const PanelApp()),
+    ],
+  ),
+);
+```
+
+Sizes follow the protocol: a zero dimension is only valid when the surface is
+anchored to both opposite edges, in which case the compositor chooses it. A
+null `size` sizes the surface to its content by default (`sizedToContent`).
+`FiloLayerSurface.output` selects an output by registry index, or -1 to let the
+compositor choose. `FiloLayerSurface.acceptsInput` defaults to true; set it to
+false for a wallpaper or overlay that should let pointer input reach the
+desktop. The output and namespace are fixed at creation; the other properties
+can be updated through the controller (`setLayer`, `setAnchors`, `setMargins`,
+`setExclusiveZone`, `setKeyboardInteractivity`, `setAcceptsInput`, or
+`updateLayerSurface`).
+
+Keyboard interactivity `onDemand` requires wlr-layer-shell version 4; older
+compositors report the update as an invalid argument. A compositor without
+`zwlr_layer_shell_v1` reports create as unsupported. Layer surfaces are
+presented with premultiplied alpha when the compositor supports it.
+
+For a layer-only app (a bar or wallpaper with no regular window), set
+`Config.initial_window = false` (`FILO_NO_INITIAL_WINDOW=1` with the development
+runner) so the embedder does not create the implicit xdg_toplevel. The Dart
+entry point then renders a `ViewCollection` containing only `FiloLayerWindow`s;
+the event loop waits for the first layer view instead of exiting on zero views.
+
 The backend is responsible for the native archetypes: top-level windows,
-dialogs, popups, and tooltips. Sizes, constraint adjustments, and anchor
-rectangles are passed through as package-owned values, so a backend does not
-need to import Flutter's private windowing types.
+dialogs, popups, tooltips, and layer surfaces. Sizes, constraint adjustments,
+and anchor rectangles are passed through as package-owned values, so a backend
+does not need to import Flutter's private windowing types.
 
 ## Backend contract
 
@@ -136,6 +198,9 @@ the embedder.
 | `FiloWindowRequest` / `FiloWindowHandle` | Create request and initial state |
 | `FiloWindowObserver` | Synchronous per-window callbacks |
 | `FiloPositioner` and related types | Backend-facing positioner values |
+| `FiloLayerSurface` | Layer, anchors, margins, exclusive zone, keyboard mode |
+| `FiloLayerWindowController` | Controller for a wlr-layer-shell window |
+| `FiloLayerWindow` | Widget that renders a layer window |
 | `FiloWindowingException` | Backend operation failure |
 
 ## Development

@@ -313,10 +313,15 @@ pub const Engine = struct {
     }
 
     /// Send metrics for the implicit view, which every engine has.
+    ///
+    /// `width`/`height` are physical pixels; the embedder converts the window's
+    /// logical size before calling this.
     pub fn sendWindowMetrics(self: *Engine, width: usize, height: usize, dpr: f64) void {
         self.sendWindowMetricsForView(0, width, height, dpr, null);
     }
 
+    /// Send metrics for one view. `width`/`height` and the constraint values
+    /// are physical pixels; `dpr` is physical pixels per logical pixel.
     pub fn sendWindowMetricsForView(
         self: *Engine,
         view_id: ViewId,
@@ -331,6 +336,7 @@ pub const Engine = struct {
 
     /// Add a view with `view_id`, initially `width`×`height` at `dpr`.
     ///
+    /// `width`, `height` and the optional constraints are physical pixels.
     /// This is asynchronous. `callback` is invoked on an engine-managed thread;
     /// it must either only touch thread-safe state or re-thread before touching
     /// Wayland or Vulkan resources. The view must not be used until the callback

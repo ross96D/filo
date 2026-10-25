@@ -84,6 +84,10 @@ abstract interface class FiloWindowingBackend {
     WindowPositioner? positioner,
   });
 
+  /// Change the wlr-layer-shell properties of a layer window. The output and
+  /// namespace are fixed at creation and ignored here.
+  void updateLayerSurface(int viewId, FiloLayerSurface surface);
+
   /// Set the native parent, or detach it when [parentViewId] is -1.
   void setParent(int viewId, int parentViewId);
 }

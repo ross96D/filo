@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
 import 'controllers.dart';
+import 'models.dart';
 
 /// A [WindowingOwner] implementation backed by a [FiloWindowingBackend].
 ///
@@ -85,6 +86,30 @@ class FiloWindowingOwner implements WindowingOwner {
       resizable: resizable,
       title: title,
       reuseImplicitView: reuseImplicitView,
+    );
+  }
+
+  /// Creates a wlr-layer-shell window. This is not part of Flutter's
+  /// `WindowingOwner` interface: layer surfaces are a Filo extension.
+  ///
+  /// The controller is a [RegularWindowController] subtype so it can be passed
+  /// to [FiloLayerWindow]. It does not adopt the implicit view.
+  FiloLayerWindowController createLayerWindowController({
+    required RegularWindowControllerDelegate delegate,
+    required FiloLayerSurface layerSurface,
+    Size? size,
+    BoxConstraints? constraints,
+    bool? sizedToContent,
+  }) {
+    _ensureEnabled();
+    return FiloLayerWindowController(
+      backend: backend,
+      delegate: delegate,
+      resolveView: resolveView,
+      layerSurface: layerSurface,
+      size: size,
+      constraints: constraints,
+      sizedToContent: sizedToContent,
     );
   }
 

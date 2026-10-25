@@ -13,6 +13,11 @@ installed artifact.
 - A Flutter engine build (`libflutter_engine.so`), its ICU data and the
   application's `flutter_assets` at runtime
 
+Layer windows additionally need a compositor that implements
+`zwlr_layer_shell_v1` (wlroots-based compositors and most desktop shells). The
+protocol is optional: without it, the regular, dialog, popup, and tooltip
+windows still work and creating a layer window reports `unsupported`.
+
 ## Consuming
 
 Add the package to the host's `build.zig.zon`:
@@ -73,14 +78,15 @@ it is enough.
 | `vulkan_validation` | Enable the Vulkan validation layer when installed                        |
 | `trace`             | Print per-frame synchronization timings                                  |
 | `extra_windows`     | Open this many extra test views at startup                               |
+| `initial_window`    | Create the implicit xdg_toplevel; false for a layer-only app             |
 | `windowing_spike`   | Exercise the exported windowing ABI from the event loop                  |
 | `engine_args`       | Extra engine switches, e.g. Flutter's `${engineOptions}`                 |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
 `FORCE_IMPELLER`, `FILO_VULKAN_VALIDATION`, `FILO_TRACE`,
-`FILO_EXTRA_WINDOWS` and `FILO_WINDOWING_SPIKE`. A host with its own
-configuration can build a `Config` directly.
+`FILO_EXTRA_WINDOWS`, `FILO_NO_INITIAL_WINDOW` and `FILO_WINDOWING_SPIKE`. A
+host with its own configuration can build a `Config` directly.
 
 The runtime copies the config strings, so the caller's buffers only need to
 live until `Runtime.init` returns. `engine_args` is the exception: the runtime

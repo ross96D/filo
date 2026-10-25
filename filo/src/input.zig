@@ -45,6 +45,12 @@ pub const Input = struct {
     focused_view: ?engine.ViewId,
     resolve_ctx: ?*anyopaque = null,
     resolve_fn: ?*const fn (?*anyopaque, *wl.Surface) ?engine.ViewId = null,
+    /// The surface the pointer is over, so each event can ask its view for the
+    /// buffer scale. Wayland positions are surface-local/logical; the Flutter
+    /// embedder expects physical pixels.
+    pointer_surface: ?*wl.Surface = null,
+    resolve_ratio_ctx: ?*anyopaque = null,
+    resolve_ratio_fn: ?*const fn (?*anyopaque, *wl.Surface) f64 = null,
 
     pub fn init(eng: *engine.Engine, ti: *text_input.TextInput) !Input {
         const ctx = xkb.xkb_context_new(CONTEXT_NO_FLAGS) orelse return error.XkbContextFailed;
@@ -73,6 +79,24 @@ pub const Input = struct {
     ) void {
         self.resolve_ctx = ctx;
         self.resolve_fn = resolve;
+    }
+
+    /// Give the input handler a way to read a view's buffer scale. Pointer
+    /// coordinates are physical in the embedder ABI.
+    pub fn setScaleResolver(
+        self: *Input,
+        ctx: ?*anyopaque,
+        resolve: *const fn (?*anyopaque, *wl.Surface) f64,
+    ) void {
+        self.resolve_ratio_ctx = ctx;
+        self.resolve_ratio_fn = resolve;
+    }
+
+    fn pointerRatio(self: *const Input) f64 {
+        const surface = self.pointer_surface orelse return 1.0;
+        const resolve = self.resolve_ratio_fn orelse return 1.0;
+        const ratio = resolve(self.resolve_ratio_ctx, surface);
+        return if (ratio > 0) ratio else 1.0;
     }
 
     fn viewForSurface(self: *Input, surface: ?*wl.Surface) ?engine.ViewId {
@@ -169,6 +193,7 @@ pub const Input = struct {
     }
 
     pub fn pointerEnter(self: *Input, surface: ?*wl.Surface, x: f64, y: f64) void {
+        self.pointer_surface = surface;
         if (self.viewForSurface(surface)) |view_id| self.pointer_view = view_id;
         self.mouse_x = x;
         self.mouse_y = y;
@@ -177,6 +202,7 @@ pub const Input = struct {
 
     pub fn pointerLeave(self: *Input) void {
         self.sendPointer(c.kRemove, 0, 0, 0, c.kFlutterPointerSignalKindNone);
+        self.pointer_surface = null;
     }
 
     pub fn pointerMotion(self: *Input, x: f64, y: f64, time_ms: u32) void {
@@ -214,16 +240,19 @@ pub const Input = struct {
     }
 
     fn sendPointer(self: *Input, phase: c_int, time_ms: u32, scroll_dx: f64, scroll_dy: f64, signal_kind: c_int) void {
+        // Wayland positions and scroll deltas are surface-local; the embedder
+        // ABI wants physical pixels.
+        const ratio = self.pointerRatio();
         const event = c.FlutterPointerEvent{
             .struct_size = @sizeOf(c.FlutterPointerEvent),
             .phase = @intCast(phase),
             .timestamp = @as(usize, time_ms) * 1000,
-            .x = self.mouse_x,
-            .y = self.mouse_y,
+            .x = self.mouse_x * ratio,
+            .y = self.mouse_y * ratio,
             .device = self.device,
             .signal_kind = @intCast(signal_kind),
-            .scroll_delta_x = scroll_dx,
-            .scroll_delta_y = scroll_dy,
+            .scroll_delta_x = scroll_dx * ratio,
+            .scroll_delta_y = scroll_dy * ratio,
             .device_kind = @intCast(c.kFlutterPointerDeviceKindMouse),
             .buttons = self.buttons,
             .pan_x = 0,

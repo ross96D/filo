@@ -97,6 +97,10 @@ class FakeBackend implements FiloWindowingBackend {
   }) => calls.add('updatePosition:$viewId');
 
   @override
+  void updateLayerSurface(int viewId, FiloLayerSurface surface) =>
+      calls.add('updateLayerSurface:$viewId:${surface.layer.name}');
+
+  @override
   void setParent(int viewId, int parentViewId) =>
       calls.add('setParent:$viewId:$parentViewId');
 }

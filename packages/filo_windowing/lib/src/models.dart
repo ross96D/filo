@@ -7,7 +7,7 @@ import 'package:flutter/rendering.dart' show BoxConstraints;
 import 'positioner.dart';
 
 /// The kind of native window a controller owns.
-enum FiloWindowKind { toplevel, popup }
+enum FiloWindowKind { toplevel, popup, layer }
 
 enum FiloToplevelState {
   /// The surface is maximized.
@@ -140,6 +140,147 @@ class FiloRect {
       height = size.height;
 }
 
+/// The z depth of a wlr-layer-shell surface, bottom-most first.
+enum FiloLayer {
+  background(0),
+  bottom(1),
+  top(2),
+  overlay(3);
+
+  final int value;
+
+  const FiloLayer(this.value);
+}
+
+/// A bitmask of the output edges a layer surface is anchored to.
+class FiloLayerAnchors {
+  final int value;
+
+  const FiloLayerAnchors(this.value);
+
+  FiloLayerAnchors operator |(FiloLayerAnchors other) {
+    return FiloLayerAnchors(value | other.value);
+  }
+
+  bool get isTop => (value & 1) != 0;
+  bool get isBottom => (value & 2) != 0;
+  bool get isLeft => (value & 4) != 0;
+  bool get isRight => (value & 8) != 0;
+
+  static const none = FiloLayerAnchors(0);
+  static const top = FiloLayerAnchors(1);
+  static const bottom = FiloLayerAnchors(2);
+  static const left = FiloLayerAnchors(4);
+  static const right = FiloLayerAnchors(8);
+
+  /// Anchored to all four edges: the surface fills the output.
+  static const all = FiloLayerAnchors(1 | 2 | 4 | 8);
+}
+
+/// How a layer surface receives keyboard events.
+enum FiloLayerKeyboardInteractivity {
+  none(0),
+  exclusive(1),
+
+  /// `on_demand` requires zwlr-layer-shell version 4. Older compositors reject
+  /// it and the backend reports an invalid argument.
+  onDemand(2);
+
+  final int value;
+
+  const FiloLayerKeyboardInteractivity(this.value);
+}
+
+/// Margins from the anchored output edges, in logical pixels.
+class FiloInsets {
+  final int top;
+  final int right;
+  final int bottom;
+  final int left;
+
+  const FiloInsets({
+    this.top = 0,
+    this.right = 0,
+    this.bottom = 0,
+    this.left = 0,
+  });
+
+  const FiloInsets.all(int value)
+    : top = value,
+      right = value,
+      bottom = value,
+      left = value;
+
+  static const zero = FiloInsets();
+}
+
+/// The wlr-layer-shell properties of a [FiloWindowKind.layer] window.
+///
+/// These are the values passed at creation and updated through
+/// [FiloWindowingBackend.updateLayerSurface].
+class FiloLayerSurface {
+  const FiloLayerSurface({
+    this.layer = FiloLayer.top,
+    this.anchors = FiloLayerAnchors.none,
+    this.exclusiveZone = 0,
+    this.keyboardInteractivity = FiloLayerKeyboardInteractivity.none,
+    this.margin = FiloInsets.zero,
+    this.output = -1,
+    this.namespace = 'filo',
+    this.acceptsInput = true,
+  });
+
+  /// Which layer to render the surface in.
+  final FiloLayer layer;
+
+  /// Output edges to anchor to.
+  final FiloLayerAnchors anchors;
+
+  /// Space to reserve at the anchored edge; 0 avoids other exclusive zones,
+  /// -1 ignores them.
+  final int exclusiveZone;
+
+  /// Whether the surface can receive keyboard focus.
+  final FiloLayerKeyboardInteractivity keyboardInteractivity;
+
+  /// Distance from the anchored edges.
+  final FiloInsets margin;
+
+  /// Index into the connection's outputs in registry order, or -1 to let the
+  /// compositor choose.
+  final int output;
+
+  /// Non-empty role namespace, e.g. `filo-bar`.
+  final String namespace;
+
+  /// Whether the surface receives pointer and touch input. Set to false for a
+  /// wallpaper or an overlay that should not intercept the desktop.
+  final bool acceptsInput;
+
+  FiloLayerSurface copyWith({
+    FiloLayer? layer,
+    FiloLayerAnchors? anchors,
+    int? exclusiveZone,
+    FiloLayerKeyboardInteractivity? keyboardInteractivity,
+    FiloInsets? margin,
+    int? output,
+    String? namespace,
+    bool? acceptsInput,
+  }) {
+    return FiloLayerSurface(
+      layer: layer ?? this.layer,
+      anchors: anchors ?? this.anchors,
+      exclusiveZone: exclusiveZone ?? this.exclusiveZone,
+      keyboardInteractivity:
+          keyboardInteractivity ?? this.keyboardInteractivity,
+      margin: margin ?? this.margin,
+      output: output ?? this.output,
+      namespace: namespace ?? this.namespace,
+      acceptsInput: acceptsInput ?? this.acceptsInput,
+    );
+  }
+}
+
 enum FiloPositionerAnchor {
   none(0),
   top(1),
@@ -227,6 +368,7 @@ class FiloWindowRequest {
     this.parentViewId = -1,
     this.preferredViewId = -1,
     this.positioner,
+    this.layer,
   });
 
   /// The xdg-shell role to create.
@@ -261,6 +403,10 @@ class FiloWindowRequest {
 
   /// Popup positioner, including its anchor rect and size.
   final FiloPositioner? positioner;
+
+  /// wlr-layer-shell properties. Required when [kind] is
+  /// [FiloWindowKind.layer].
+  final FiloLayerSurface? layer;
 }
 
 /// The initial state of a created window.

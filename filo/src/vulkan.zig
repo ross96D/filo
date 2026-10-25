@@ -1,6 +1,9 @@
 const std = @import("std");
 const vk = @import("vulkan");
 
+const wayland = @import("wayland");
+const wl = wayland.client.wl;
+
 pub const instance_extensions = [_][*:0]const u8{
     vk.instance_extensions.khr_surface.name.ptr,
     vk.instance_extensions.khr_wayland_surface.name.ptr,
@@ -381,6 +384,16 @@ fn colorSubresourceRange() vk.ImageSubresourceRange {
 pub const Surface = struct {
     ctx: *Context,
     surface: vk.SurfaceKHR,
+    /// The Wayland surface the swapchain presents to. Its buffer scale tells
+    /// the compositor how many buffer pixels make one surface-local pixel.
+    wl_surface: *wl.Surface,
+    /// The buffer scale the compositor currently has. Only touched by the
+    /// raster thread.
+    buffer_scale: u32 = 1,
+    /// A buffer scale requested by the event loop. It is applied with the
+    /// first frame whose buffer dimensions are a multiple of it, because
+    /// `wl_surface.commit` rejects a buffer that is not.
+    pending_buffer_scale: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
     /// The swapchain to draw into. Null only between a failed rebuild and the
     /// next frame's attempt at one: with no swapchain there is nothing to draw
     /// into, so that frame is dropped.
@@ -389,6 +402,9 @@ pub const Surface = struct {
     /// separately from `Swapchain.extent` so that a clamped extent cannot make
     /// every frame rebuild with the same result.
     frame_size: vk.Extent2D,
+    /// Whether the swapchain is presented with premultiplied alpha. Layer
+    /// surfaces use it so panels and overlays can have transparent regions.
+    transparent: bool = false,
     /// Set when the swapchain no longer matches the surface: a suboptimal
     /// present, or an out-of-date acquire. It is rebuilt on the next frame.
     stale: bool = false,
@@ -403,7 +419,14 @@ pub const Surface = struct {
     cmd_fence: vk.Fence,
     cmd_fence_armed: bool = false,
 
-    pub fn create(ctx: *Context, wl_display: *anyopaque, wl_surface: *anyopaque, width: u32, height: u32) !Surface {
+    pub fn create(
+        ctx: *Context,
+        wl_display: *anyopaque,
+        wl_surface: *anyopaque,
+        width: u32,
+        height: u32,
+        transparent: bool,
+    ) !Surface {
         const surface = try ctx.vki.createWaylandSurfaceKHR(ctx.instance, &.{
             .display = @ptrCast(@alignCast(wl_display)),
             .surface = @ptrCast(@alignCast(wl_surface)),
@@ -411,7 +434,7 @@ pub const Surface = struct {
         errdefer ctx.vki.destroySurfaceKHR(ctx.instance, surface, null);
 
         const size = vk.Extent2D{ .width = width, .height = height };
-        const swapchain = try buildSwapchain(ctx, surface, size);
+        const swapchain = try buildSwapchain(ctx, surface, size, transparent);
         errdefer swapchain.destroy(ctx);
 
         const cmd_pool = try ctx.vkd.createCommandPool(ctx.device, &.{
@@ -433,8 +456,10 @@ pub const Surface = struct {
         return .{
             .ctx = ctx,
             .surface = surface,
+            .wl_surface = @ptrCast(@alignCast(wl_surface)),
             .swapchain = swapchain,
             .frame_size = size,
+            .transparent = transparent,
             .trace = Trace.init(ctx.options.trace),
             .cmd_pool = cmd_pool,
             .cmd = cmd,
@@ -467,7 +492,7 @@ pub const Surface = struct {
         if (self.swapchain) |swapchain| swapchain.destroy(self.ctx);
         self.swapchain = null;
 
-        const built = try buildSwapchain(self.ctx, self.surface, size);
+        const built = try buildSwapchain(self.ctx, self.surface, size, self.transparent);
         // The driver may have picked a different size than the one asked for,
         // and this is the size the surface will have, not the one the engine
         // draws at: worth saying out loud.
@@ -488,11 +513,19 @@ pub const Surface = struct {
     /// Build a swapchain and the images it holds. The extent is clamped to what
     /// the surface supports, so it can differ from `size`, which is what the
     /// engine draws at.
-    fn buildSwapchain(ctx: *Context, surface: vk.SurfaceKHR, size: vk.Extent2D) !Swapchain {
+    fn buildSwapchain(ctx: *Context, surface: vk.SurfaceKHR, size: vk.Extent2D, transparent: bool) !Swapchain {
         const caps = try ctx.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.pdev, surface);
         const extent = swapchainExtent(size, caps);
         const format = try chooseSurfaceFormat(ctx, surface);
         const present_mode = try choosePresentMode(ctx, surface);
+        // Opaque toplevels ignore their buffer's alpha. A layer surface asks
+        // for premultiplied alpha so the compositor can blend transparent
+        // regions; fall back to opaque if the compositor does not support it.
+        const composite_alpha: vk.CompositeAlphaFlagsKHR = if (transparent and
+            caps.supported_composite_alpha.pre_multiplied_khr)
+            .{ .pre_multiplied_khr = true }
+        else
+            .{ .opaque_khr = true };
 
         // Mailbox keeps `vkQueuePresentKHR` from blocking when an occluded
         // surface's buffers are not being released quickly. With several
@@ -520,7 +553,7 @@ pub const Surface = struct {
             },
             .image_sharing_mode = .exclusive,
             .pre_transform = caps.current_transform,
-            .composite_alpha = .{ .opaque_khr = true },
+            .composite_alpha = composite_alpha,
             .present_mode = present_mode,
             .clipped = .true,
         }, null);
@@ -681,6 +714,28 @@ pub const Surface = struct {
         }});
     }
 
+    /// Ask for a new buffer scale. The raster thread applies it with the next
+    /// frame whose buffer dimensions are a multiple of the scale.
+    pub fn requestBufferScale(self: *Surface, value: u32) void {
+        if (value == 0) return;
+        self.pending_buffer_scale.store(value, .release);
+    }
+
+    /// Apply a requested buffer scale once the frame being presented can carry
+    /// it. `wl_surface.commit` rejects a buffer whose dimensions are not an
+    /// integer multiple of the buffer scale, so an in-flight frame at the old
+    /// scale is passed over instead of being committed with a new scale.
+    fn applyPendingBufferScale(self: *Surface, width: u32, height: u32) void {
+        if (width == 0 or height == 0) return;
+        const pending = self.pending_buffer_scale.load(.acquire);
+        if (pending == 0 or pending == self.buffer_scale) return;
+        if (!bufferSizeMatchesScale(width, height, pending)) return;
+        if (self.wl_surface.getVersion() < 3) return;
+
+        self.wl_surface.setBufferScale(@intCast(pending));
+        self.buffer_scale = pending;
+    }
+
     /// Composite the engine's backing-store images onto the swapchain and
     /// present them. The engine host-syncs its own rendering before calling
     /// this, so the only synchronization this needs is the layout transitions
@@ -694,6 +749,10 @@ pub const Surface = struct {
 
         const image = try self.acquire(width, height);
         const swapchain = self.swapchain orelse return error.NoSwapchain;
+        // The buffer that will be committed is the swapchain extent, which may
+        // be clamped from the frame size. Apply a pending scale only when it
+        // divides that exact buffer.
+        self.applyPendingBufferScale(swapchain.extent.width, swapchain.extent.height);
 
         const cmd = try self.beginCommands();
         errdefer self.ctx.vkd.resetCommandBuffer(cmd, .{}) catch {};
@@ -710,7 +769,8 @@ pub const Surface = struct {
             .{},
             .{ .transfer_write = true },
         );
-        const clear = vk.ClearColorValue{ .float_32 = .{ 0.0, 0.0, 0.0, 1.0 } };
+        const clear_alpha: f32 = if (self.transparent) 0.0 else 1.0;
+        const clear = vk.ClearColorValue{ .float_32 = .{ 0.0, 0.0, 0.0, clear_alpha } };
         self.ctx.vkd.cmdClearColorImage(cmd, image, .transfer_dst_optimal, &clear, &.{colorSubresourceRange()});
 
         for (layers) |layer| {
@@ -827,6 +887,13 @@ pub const Surface = struct {
     }
 };
 
+/// Whether a buffer can be committed with `buffer_scale`: Wayland requires
+/// both dimensions to be an integer multiple of the scale.
+fn bufferSizeMatchesScale(width: u32, height: u32, buffer_scale: u32) bool {
+    if (buffer_scale == 0) return false;
+    return width % buffer_scale == 0 and height % buffer_scale == 0;
+}
+
 /// The extent to create a swapchain at: the size the engine is drawing at,
 /// clamped to what the surface supports. The Wayland compositor takes the
 /// surface size from the buffers we attach, and `current_extent` only reports
@@ -854,4 +921,12 @@ test "the swapchain follows the frame size, clamped to what the surface supports
     // Outside the surface limits.
     try expectExtent(.{ .width = 2, .height = 2 }, swapchainExtent(.{ .width = 1, .height = 1 }, caps));
     try expectExtent(.{ .width = 4096, .height = 4096 }, swapchainExtent(.{ .width = 8000, .height = 6000 }, caps));
+}
+
+test "a buffer scale only applies to a buffer it divides" {
+    try std.testing.expect(bufferSizeMatchesScale(1600, 1200, 2));
+    try std.testing.expect(!bufferSizeMatchesScale(1601, 1200, 2));
+    try std.testing.expect(!bufferSizeMatchesScale(1600, 1201, 2));
+    try std.testing.expect(bufferSizeMatchesScale(801, 601, 1));
+    try std.testing.expect(!bufferSizeMatchesScale(800, 600, 0));
 }

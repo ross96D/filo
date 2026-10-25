@@ -197,6 +197,91 @@ void main() {
     expect(notified, 1);
   });
 
+  test(
+    'a layer window carries its layer surface and does not adopt view 0',
+    () {
+      final delegate = _RegularDelegate();
+      final controller = owner.createLayerWindowController(
+        delegate: delegate,
+        layerSurface: FiloLayerSurface(
+          layer: FiloLayer.overlay,
+          anchors:
+              FiloLayerAnchors.top |
+              FiloLayerAnchors.left |
+              FiloLayerAnchors.right,
+          exclusiveZone: 32,
+          keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
+          margin: FiloInsets(top: 4, left: 8, right: 8),
+          output: 0,
+          namespace: 'filo-test',
+          acceptsInput: false,
+        ),
+        size: const Size(0, 32),
+      );
+
+      expect(controller.rootView, same(view));
+      expect(backend.lastViewId, isNot(0));
+      expect(controller.layerSurface.layer, FiloLayer.overlay);
+
+      final request = backend.requests.single;
+      expect(request.kind, FiloWindowKind.layer);
+      expect(request.preferredViewId, -1);
+      expect(request.resizable, isFalse);
+      expect(request.sizedToContent, isFalse);
+
+      final layer = request.layer!;
+      expect(layer.anchors.value, 1 | 4 | 8);
+      expect(layer.anchors.isTop, isTrue);
+      expect(layer.anchors.isBottom, isFalse);
+      expect(layer.exclusiveZone, 32);
+      expect(
+        layer.keyboardInteractivity,
+        FiloLayerKeyboardInteractivity.onDemand,
+      );
+      expect(layer.margin.top, 4);
+      expect(layer.margin.left, 8);
+      expect(layer.output, 0);
+      expect(layer.namespace, 'filo-test');
+      expect(layer.acceptsInput, isFalse);
+    },
+  );
+
+  test('updating layer properties goes through the backend', () {
+    final controller = owner.createLayerWindowController(
+      delegate: _RegularDelegate(),
+      layerSurface: const FiloLayerSurface(),
+    );
+    final id = backend.lastViewId!;
+
+    controller.setAnchors(FiloLayerAnchors.bottom);
+    controller.setExclusiveZone(-1);
+    controller.setMargins(const FiloInsets.all(6));
+    controller.setKeyboardInteractivity(
+      FiloLayerKeyboardInteractivity.exclusive,
+    );
+    controller.setAcceptsInput(false);
+    controller.setLayer(FiloLayer.bottom);
+
+    expect(controller.layerSurface.layer, FiloLayer.bottom);
+    expect(controller.layerSurface.anchors.value, 2);
+    expect(controller.layerSurface.exclusiveZone, -1);
+    expect(controller.layerSurface.margin.bottom, 6);
+    expect(
+      controller.layerSurface.keyboardInteractivity,
+      FiloLayerKeyboardInteractivity.exclusive,
+    );
+    expect(controller.layerSurface.acceptsInput, isFalse);
+    expect(backend.calls, contains('updateLayerSurface:$id:bottom'));
+    expect(
+      backend.calls.where((call) => call == 'updateLayerSurface:$id:bottom'),
+      hasLength(1),
+    );
+    expect(
+      backend.calls.where((call) => call == 'updateLayerSurface:$id:top'),
+      hasLength(5),
+    );
+  });
+
   test('a dialog is a parented toplevel', () {
     final regular = owner.createRegularWindowController(
       delegate: _RegularDelegate(),
@@ -284,6 +369,33 @@ void main() {
         resizable: true,
       ),
       throwsUnimplementedError,
+    );
+  });
+
+  testWidgets('FiloLayerWindow renders the controller root view', (
+    tester,
+  ) async {
+    final controller = owner.createLayerWindowController(
+      delegate: _RegularDelegate(),
+      layerSurface: const FiloLayerSurface(),
+      size: const Size(200, 100),
+    );
+
+    await tester.pumpWidget(
+      FiloLayerWindow(
+        controller: controller,
+        child: const Directionality(
+          textDirection: TextDirection.ltr,
+          child: Text('layer content'),
+        ),
+      ),
+      wrapWithView: false,
+    );
+
+    expect(find.text('layer content'), findsOneWidget);
+    expect(
+      WindowScope.of(tester.element(find.text('layer content'))),
+      same(controller),
     );
   });
 }

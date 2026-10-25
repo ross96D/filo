@@ -16,6 +16,10 @@ pub const Config = struct {
     /// Open this many extra 800x600 views at startup, for testing multi-view
     /// rendering without clicking anything.
     extra_windows: u32 = 0,
+    /// Create the initial xdg_toplevel that backs the implicit view. Set to
+    /// false for a layer-only app (a bar or wallpaper) whose Dart entry point
+    /// renders a `ViewCollection` of layer windows instead.
+    initial_window: bool = true,
     /// Exercise the exported windowing ABI from the event loop.
     windowing_spike: bool = false,
     /// Extra engine switches, as passed by Flutter's custom-device
@@ -39,6 +43,7 @@ pub const Config = struct {
                 std.fmt.parseInt(u32, value, 10) catch 2
             else
                 0,
+            .initial_window = map.get("FILO_NO_INITIAL_WINDOW") == null,
             .windowing_spike = map.get("FILO_WINDOWING_SPIKE") != null,
         };
     }

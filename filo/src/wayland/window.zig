@@ -3,8 +3,10 @@ const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
+const zwlr = wayland.client.zwlr;
 
 const engine = @import("../engine.zig");
+const scale = @import("../scale.zig");
 const windowing = @import("../windowing.zig");
 
 /// What a configure of 0×0 means: the compositor is leaving the size to us.
@@ -14,33 +16,51 @@ const default_height = 600;
 /// The largest size a popup or content-sized window can ask the engine for.
 pub const max_content_size = 4_096;
 
-/// The scale factor reported to the engine. Wayland lets the compositor scale
-/// the buffer we attach instead, which is what we rely on: the swapchain is
-/// always as big as the engine drew. Fractional and integer buffer scale would
-/// both mean drawing at a different size than we tell the engine.
-const default_pixel_ratio = 1.5;
+/// The fallback buffer scale before the compositor has reported one. The
+/// connection replaces it with `wl_surface.preferred_buffer_scale`, or
+/// `wl_output.scale` on compositors older than core Wayland 6.
+pub const default_pixel_ratio: f64 = 1.0;
 
-/// The xdg-shell role a surface has. Toplevels are regular windows, dialogs and
-/// satellites; popups are tooltips and popups.
+/// The role a surface has. Toplevels are regular windows, dialogs and
+/// satellites; popups are tooltips and popups; a layer surface is the
+/// wlr-layer-shell role (a bar, wallpaper, overlay, …).
 pub const Role = union(enum) {
     toplevel: *xdg.Toplevel,
     popup: *xdg.Popup,
+    layer: *zwlr.LayerSurfaceV1,
 };
 
-/// One window: a surface and its xdg-shell role. The connection it lives on,
-/// the engine it draws for, and the loop that drives it are owned elsewhere and
-/// passed in where they are needed.
+/// One window: a surface and its xdg-shell or layer-shell role. The connection
+/// it lives on, the engine it draws for, and the loop that drives it are owned
+/// elsewhere and passed in where they are needed.
 pub const Window = struct {
     surface: *wl.Surface,
-    xdg_surface: *xdg.Surface,
+    /// Null for layer surfaces: wlr-layer-shell replaces xdg_surface.
+    xdg_surface: ?*xdg.Surface = null,
     role: Role,
+
+    /// The layer-surface properties last applied. The namespace pointer is not
+    /// retained; only the double-buffered state is.
+    layer_state: windowing.LayerSurface = std.mem.zeroes(windowing.LayerSurface),
+    /// Layer surfaces are composited with premultiplied alpha, so panels and
+    /// overlays can have transparent regions.
+    transparent: bool = false,
 
     configured: bool = false,
     /// Size the compositor last asked for, in surface (logical) pixels. Starts
     /// at the default because the initial configure may leave the size to us.
     width: u32 = default_width,
     height: u32 = default_height,
+    /// The integer factor between attached buffers and this surface-local size.
+    /// Wayland surface-local coordinates stay logical; the engine is told
+    /// `logical * pixel_ratio` physical pixels at this ratio.
     pixel_ratio: f64 = default_pixel_ratio,
+    /// The compositor changed the buffer scale; the event loop resends metrics.
+    scale_dirty: bool = false,
+    /// The compositor sent a per-surface preferred buffer scale. It is more
+    /// accurate than the output-wide fallback: it follows the surface between
+    /// outputs.
+    scale_from_compositor: bool = false,
     /// Whether the platform should derive the surface size from the first
     /// rendered frame. Popups and sized-to-content windows set this.
     ///
@@ -52,8 +72,8 @@ pub const Window = struct {
     /// size has been applied; a popup and a non-resizable window keep tracking.
     track_content_size: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     resizable: bool = true,
-    /// Limits for engine metrics while tracking the content size. They are in
-    /// the same units as the metrics event, i.e. physical pixels.
+    /// Limits for engine metrics while tracking the content size, in logical
+    /// pixels. `metricsConstraints` converts them to physical pixels.
     content_min_width: u32 = 1,
     content_min_height: u32 = 1,
     content_max_width: u32 = max_content_size,
@@ -102,6 +122,7 @@ pub const Window = struct {
         };
         xdg_surface.setListener(*Window, xdgSurfaceListener, self);
         toplevel.setListener(*Window, toplevelListener, self);
+        surface.setListener(*Window, surfaceListener, self);
         surface.commit();
         return self;
     }
@@ -121,6 +142,35 @@ pub const Window = struct {
         };
         xdg_surface.setListener(*Window, xdgSurfaceListener, self);
         popup.setListener(*Window, popupListener, self);
+        surface.setListener(*Window, surfaceListener, self);
+        surface.commit();
+        return self;
+    }
+
+    /// Install a layer window on a freshly created surface and layer-surface
+    /// proxy. The initial state and size are queued before the first commit,
+    /// which is the commit the compositor answers with its first configure.
+    pub fn createLayer(
+        allocator: std.mem.Allocator,
+        surface: *wl.Surface,
+        layer_surface: *zwlr.LayerSurfaceV1,
+        state: windowing.LayerSurface,
+        width: u32,
+        height: u32,
+    ) !*Window {
+        const self = try allocator.create(Window);
+        self.* = .{
+            .surface = surface,
+            .role = .{ .layer = layer_surface },
+            .width = width,
+            .height = height,
+            .transparent = true,
+        };
+        errdefer allocator.destroy(self);
+        layer_surface.setListener(*Window, layerSurfaceListener, self);
+        surface.setListener(*Window, surfaceListener, self);
+        try self.writeLayerSurface(state);
+        layer_surface.setSize(width, height);
         surface.commit();
         return self;
     }
@@ -129,8 +179,9 @@ pub const Window = struct {
         switch (self.role) {
             .toplevel => |toplevel| toplevel.destroy(),
             .popup => |popup| popup.destroy(),
+            .layer => |layer| layer.destroy(),
         }
-        self.xdg_surface.destroy();
+        if (self.xdg_surface) |xdg_surface| xdg_surface.destroy();
         self.surface.destroy();
         allocator.destroy(self);
     }
@@ -138,8 +189,69 @@ pub const Window = struct {
     pub fn isPopup(self: *const Window) bool {
         return switch (self.role) {
             .popup => true,
-            .toplevel => false,
+            .toplevel, .layer => false,
         };
+    }
+
+    pub fn isLayer(self: *const Window) bool {
+        return switch (self.role) {
+            .layer => true,
+            .toplevel, .popup => false,
+        };
+    }
+
+    pub fn layerRole(self: *Window) ?*zwlr.LayerSurfaceV1 {
+        return switch (self.role) {
+            .layer => |layer| layer,
+            .toplevel, .popup => null,
+        };
+    }
+
+    /// Queue a new layer-surface state and apply it with the next commit.
+    pub fn applyLayerSurface(self: *Window, state: windowing.LayerSurface) !void {
+        try self.writeLayerSurface(state);
+        self.commit();
+    }
+
+    fn writeLayerSurface(self: *Window, state: windowing.LayerSurface) !void {
+        const layer_surface = self.layerRole() orelse return error.NotALayerSurface;
+        if (!layerSizeValid(state.anchor, self.width, self.height)) return error.InvalidSize;
+
+        // `get_layer_surface` already assigned the layer at creation. The
+        // request only exists from version 2 on.
+        const layer = layerFromInt(state.layer) orelse return error.InvalidLayer;
+        if (layer_surface.getVersion() >= 2) layer_surface.setLayer(layer);
+
+        layer_surface.setAnchor(layerAnchor(state.anchor));
+        layer_surface.setExclusiveZone(state.exclusive_zone);
+        layer_surface.setMargin(
+            state.margin_top,
+            state.margin_right,
+            state.margin_bottom,
+            state.margin_left,
+        );
+
+        const interactivity = keyboardInteractivityFromInt(state.keyboard_interactivity) orelse
+            return error.InvalidKeyboardInteractivity;
+        // `on_demand` was added in version 4.
+        if (interactivity == .on_demand and layer_surface.getVersion() < 4) {
+            return error.UnsupportedKeyboardInteractivity;
+        }
+        layer_surface.setKeyboardInteractivity(interactivity);
+
+        self.layer_state = state;
+        self.layer_state.namespace = null;
+    }
+
+    /// Change the layer surface's requested size. The compositor may ignore it
+    /// when the surface is anchored to opposite edges.
+    pub fn setSize(self: *Window, size: windowing.Size) void {
+        const layer_surface = self.layerRole() orelse return;
+        self.width = size.width;
+        self.height = size.height;
+        layer_surface.setSize(size.width, size.height);
+        self.resized = true;
+        self.commit();
     }
 
     /// Copy the sizing flags and bounds out of a windowing request.
@@ -168,22 +280,60 @@ pub const Window = struct {
         return self.track_content_size.load(.acquire);
     }
 
+    /// Use `ratio` as the buffer scale. `wl_surface.set_buffer_scale` is
+    /// integral and only exists from surface version 3; older compositors keep
+    /// a 1:1 mapping. The request is applied by the raster thread with the
+    /// first frame whose buffer size is a multiple of the new scale, so a scale
+    /// change cannot commit an old, incompatible buffer.
+    pub fn setPixelRatio(self: *Window, ratio: f64) void {
+        const integer = scale.integral(ratio);
+        if (self.surface.getVersion() < 3) return;
+
+        const value: f64 = @floatFromInt(integer);
+        if (self.pixel_ratio == value) return;
+
+        self.pixel_ratio = value;
+        self.scale_dirty = true;
+    }
+
+    /// The integer `wl_surface` buffer scale for the current ratio.
+    pub fn bufferScale(self: *const Window) u32 {
+        return scale.integral(self.pixel_ratio);
+    }
+
+    /// The attached buffer width in physical pixels.
+    pub fn physicalWidth(self: *const Window) u32 {
+        return scale.physical(self.width, self.pixel_ratio);
+    }
+
+    /// The attached buffer height in physical pixels.
+    pub fn physicalHeight(self: *const Window) u32 {
+        return scale.physical(self.height, self.pixel_ratio);
+    }
+
     /// Bounds for the engine metrics event, or null for the normal tight case.
+    /// The event is in physical pixels, while the stored limits are logical.
     pub fn metricsConstraints(self: *const Window) ?engine.WindowConstraints {
         if (!self.isTrackingContentSize()) return null;
         return .{
-            .min_width = self.content_min_width,
-            .min_height = self.content_min_height,
-            .max_width = self.content_max_width,
-            .max_height = self.content_max_height,
+            .min_width = scale.physical(self.content_min_width, self.pixel_ratio),
+            .min_height = scale.physical(self.content_min_height, self.pixel_ratio),
+            .max_width = scale.physical(self.content_max_width, self.pixel_ratio),
+            .max_height = scale.physical(self.content_max_height, self.pixel_ratio),
         };
     }
 
-    /// Apply a size derived from a rendered frame to a toplevel. Popups get
-    /// their size through `xdg_popup.reposition` instead.
+    /// Apply a size derived from a rendered frame to a toplevel or layer
+    /// surface. Popups get their size through `xdg_popup.reposition` instead.
     pub fn applyContentSize(self: *Window, width: u32, height: u32) void {
         self.width = width;
         self.height = height;
+        if (self.layerRole()) |layer_surface| {
+            layer_surface.setSize(width, height);
+            self.commit();
+            self.resized = true;
+            return;
+        }
         if (!self.resizable) {
             const fixed = windowing.Size{ .width = width, .height = height };
             self.setMinSize(fixed);
@@ -205,7 +355,7 @@ pub const Window = struct {
     fn toplevelRole(self: *Window) ?*xdg.Toplevel {
         return switch (self.role) {
             .toplevel => |toplevel| toplevel,
-            .popup => null,
+            .popup, .layer => null,
         };
     }
 
@@ -259,7 +409,7 @@ pub const Window = struct {
                 popup.reposition(positioner, self.reposition_token);
                 self.reposition_token +%= 1;
             },
-            .toplevel => {},
+            .toplevel, .layer => {},
         }
     }
 
@@ -268,20 +418,48 @@ pub const Window = struct {
         self.surface.commit();
     }
 
-    /// Forward a size the compositor asked for to the engine. The swapchain
-    /// itself is not touched here: it follows the size the engine says it draws
-    /// at (see `vulkan.Surface.acquire`), which is what the metrics below tell
-    /// it, so there is nothing to hand over between threads.
+    /// Forward a size the compositor asked for to the engine, and/or new
+    /// buffer-scale metrics, in the physical pixels the embedder ABI expects.
+    /// The swapchain itself is not touched here: it follows the size the engine
+    /// says it draws at (see `vulkan.Surface.acquire`), which is what the
+    /// metrics below tell it, so there is nothing to hand over between threads.
     pub fn applyResize(self: *Window, eng: *engine.Engine, view_id: engine.ViewId) void {
-        if (!self.resized) return;
+        if (!self.resized and !self.scale_dirty) return;
         self.resized = false;
+        self.scale_dirty = false;
 
-        std.debug.print("filo: view {} resized to {}x{}\n", .{ view_id, self.width, self.height });
-        eng.sendWindowMetricsForView(view_id, self.width, self.height, self.pixel_ratio, self.metricsConstraints());
+        std.debug.print("filo: view {} resized to {}x{} logical at scale {d}\n", .{
+            view_id,
+            self.width,
+            self.height,
+            self.pixel_ratio,
+        });
+        eng.sendWindowMetricsForView(
+            view_id,
+            self.physicalWidth(),
+            self.physicalHeight(),
+            self.pixel_ratio,
+            self.metricsConstraints(),
+        );
         // A window metrics event makes the framework relayout and schedule a
         // frame on its own; asking for one anyway means a resize can never be
         // left unpainted.
         eng.scheduleFrame();
+    }
+
+    /// The compositor's per-surface buffer-scale preference. It is the
+    /// documented source for HiDPI clients (core Wayland 6) and supersedes the
+    /// output-wide `wl_output.scale` fallback, especially when a window moves
+    /// between outputs with different scales.
+    fn surfaceListener(_: *wl.Surface, event: wl.Surface.Event, self: *Window) void {
+        switch (event) {
+            .preferred_buffer_scale => |value| {
+                if (value.factor <= 0) return;
+                self.setPixelRatio(@floatFromInt(value.factor));
+                self.scale_from_compositor = true;
+            },
+            else => {},
+        }
     }
 
     fn xdgSurfaceListener(xdg_surface: *xdg.Surface, event: xdg.Surface.Event, self: *Window) void {
@@ -350,11 +528,58 @@ pub const Window = struct {
             },
             // The compositor dismissed the popup; the client should destroy it.
             .popup_done => {
-                std.debug.print("ASDLASHDAS\n", .{});
                 self.popup_done = true;
             },
             // The following `configure` carries the new geometry.
             .repositioned => {},
+        }
+    }
+
+    /// A layer surface configure: acknowledge it, then adopt the size the
+    /// compositor assigned. A zero dimension means the compositor left the
+    /// choice to us, so the requested size stays in place.
+    fn layerSurfaceListener(
+        _: *zwlr.LayerSurfaceV1,
+        event: zwlr.LayerSurfaceV1.Event,
+        self: *Window,
+    ) void {
+        switch (event) {
+            .configure => |configure| {
+                const layer_surface = self.layerRole() orelse return;
+                layer_surface.ackConfigure(configure.serial);
+
+                var changed = false;
+                if (configure.width != 0 and configure.width != self.width) {
+                    self.width = configure.width;
+                    changed = true;
+                }
+                if (configure.height != 0 and configure.height != self.height) {
+                    self.height = configure.height;
+                    changed = true;
+                }
+                if (changed) {
+                    // The configure asks for a size the surface state has to
+                    // match before the buffer for it can be attached. A zero
+                    // dimension means the compositor left that axis to us, so
+                    // repeat our current value.
+                    layer_surface.setSize(self.width, self.height);
+                    self.resized = true;
+                }
+
+                // Acknowledge the configure with the commit that follows it.
+                self.surface.commit();
+                self.configured = true;
+
+                // A content-sized layer surface stops tracking while it asks
+                // for its content size. A matching configure is the
+                // confirmation that lets it track later content changes again.
+                if (self.isSizedToContent() and !self.resizable and !changed) {
+                    self.track_content_size.store(true, .release);
+                }
+            },
+            // The compositor will not show this surface any more. Treat it as
+            // a close request so the controller can destroy and recreate it.
+            .closed => self.closing = true,
         }
     }
 
@@ -420,6 +645,44 @@ pub const Window = struct {
     }
 };
 
+fn layerFromInt(value: i32) ?zwlr.LayerShellV1.Layer {
+    return switch (value) {
+        0 => .background,
+        1 => .bottom,
+        2 => .top,
+        3 => .overlay,
+        else => null,
+    };
+}
+
+/// The ABI anchor bitmask and `zwlr_layer_surface_v1.anchor` share the same bit
+/// values; mask off anything that is not one of the four edges.
+fn layerAnchor(bits: u32) zwlr.LayerSurfaceV1.Anchor {
+    return @bitCast(bits & (windowing.LayerAnchor.top |
+        windowing.LayerAnchor.bottom |
+        windowing.LayerAnchor.left |
+        windowing.LayerAnchor.right));
+}
+
+fn keyboardInteractivityFromInt(value: i32) ?zwlr.LayerSurfaceV1.KeyboardInteractivity {
+    return switch (value) {
+        0 => .none,
+        1 => .exclusive,
+        2 => .on_demand,
+        else => null,
+    };
+}
+
+/// A zero layer-surface dimension is only legal when both opposite edges are
+/// anchored: the compositor owns that dimension then.
+pub fn layerSizeValid(anchor: u32, width: u32, height: u32) bool {
+    const horizontal = anchor & (windowing.LayerAnchor.left | windowing.LayerAnchor.right) ==
+        (windowing.LayerAnchor.left | windowing.LayerAnchor.right);
+    const vertical = anchor & (windowing.LayerAnchor.top | windowing.LayerAnchor.bottom) ==
+        (windowing.LayerAnchor.top | windowing.LayerAnchor.bottom);
+    return (width != 0 or horizontal) and (height != 0 or vertical);
+}
+
 test "a configure that leaves the size to us is not a resize" {
     const testing = std.testing;
 
@@ -450,4 +713,54 @@ test "wm capabilities map to the ABI bitmask" {
     try testing.expectEqual(windowing.WmCapabilities.fullscreen, Window.capabilityBit(3));
     try testing.expectEqual(windowing.WmCapabilities.minimize, Window.capabilityBit(4));
     try testing.expectEqual(@as(u32, 0), Window.capabilityBit(5));
+}
+
+test "layer values map to the wlr-layer-shell enums" {
+    const testing = std.testing;
+
+    try testing.expectEqual(zwlr.LayerShellV1.Layer.background, layerFromInt(0).?);
+    try testing.expectEqual(zwlr.LayerShellV1.Layer.bottom, layerFromInt(1).?);
+    try testing.expectEqual(zwlr.LayerShellV1.Layer.top, layerFromInt(2).?);
+    try testing.expectEqual(zwlr.LayerShellV1.Layer.overlay, layerFromInt(3).?);
+    try testing.expectEqual(@as(?zwlr.LayerShellV1.Layer, null), layerFromInt(4));
+
+    try testing.expectEqual(
+        zwlr.LayerSurfaceV1.KeyboardInteractivity.none,
+        keyboardInteractivityFromInt(0).?,
+    );
+    try testing.expectEqual(
+        zwlr.LayerSurfaceV1.KeyboardInteractivity.on_demand,
+        keyboardInteractivityFromInt(2).?,
+    );
+    try testing.expectEqual(@as(?zwlr.LayerSurfaceV1.KeyboardInteractivity, null), keyboardInteractivityFromInt(3));
+}
+
+test "layer anchor bits keep only the four edges" {
+    const testing = std.testing;
+
+    const bits: u32 = windowing.LayerAnchor.top |
+        windowing.LayerAnchor.right |
+        0xffff_fff0;
+    try testing.expectEqual(
+        @as(u32, windowing.LayerAnchor.top | windowing.LayerAnchor.right),
+        @as(u32, @bitCast(layerAnchor(bits))),
+    );
+}
+
+test "a zero layer dimension needs opposite anchors" {
+    const testing = std.testing;
+    const all: u32 = windowing.LayerAnchor.top |
+        windowing.LayerAnchor.bottom |
+        windowing.LayerAnchor.left |
+        windowing.LayerAnchor.right;
+
+    // Both dimensions fixed: any anchors are fine.
+    try testing.expect(layerSizeValid(0, 320, 40));
+    // Stretched horizontally and vertically.
+    try testing.expect(layerSizeValid(all, 0, 0));
+    // A zero width needs left and right; a zero height needs top and bottom.
+    try testing.expect(!layerSizeValid(windowing.LayerAnchor.top, 0, 40));
+    try testing.expect(!layerSizeValid(windowing.LayerAnchor.left, 320, 0));
+    try testing.expect(layerSizeValid(windowing.LayerAnchor.left | windowing.LayerAnchor.right, 0, 40));
+    try testing.expect(layerSizeValid(windowing.LayerAnchor.top | windowing.LayerAnchor.bottom, 320, 0));
 }

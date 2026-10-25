@@ -62,6 +62,40 @@ final class _Positioner extends Struct {
   external _Offset offset;
 }
 
+final class _LayerSurface extends Struct {
+  @Int32()
+  external int layer;
+
+  @Uint32()
+  external int anchor;
+
+  @Int32()
+  external int exclusiveZone;
+
+  @Int32()
+  external int keyboardInteractivity;
+
+  @Int32()
+  external int marginTop;
+
+  @Int32()
+  external int marginRight;
+
+  @Int32()
+  external int marginBottom;
+
+  @Int32()
+  external int marginLeft;
+
+  @Int32()
+  external int output;
+
+  external Pointer<Utf8> namespace;
+
+  @Uint8()
+  external int acceptsInput;
+}
+
 final class _WindowRequest extends Struct {
   @Int32()
   external int kind;
@@ -91,6 +125,8 @@ final class _WindowRequest extends Struct {
   external int preferredViewId;
 
   external _Positioner positioner;
+
+  external _LayerSurface layerSurface;
 }
 
 final class _WindowHandle extends Struct {
@@ -195,6 +231,11 @@ external int _updatePosition(
   Pointer<_Positioner> positioner,
 );
 
+@Native<Int32 Function(Int64, Pointer<_LayerSurface>)>(
+  symbol: 'filo_window_update_layer_surface',
+)
+external int _updateLayerSurface(int viewId, Pointer<_LayerSurface> layer);
+
 //------------------------------------------------------------------------------
 // Native backend
 //------------------------------------------------------------------------------
@@ -206,11 +247,24 @@ class FiloNativeBackend implements FiloWindowingBackend {
 
   @override
   FiloWindowHandle createWindow(FiloWindowRequest request) {
+    if (request.kind == FiloWindowKind.layer && request.layer == null) {
+      throw const FiloWindowingException(
+        'createWindow failed: layer windows need a layer surface',
+      );
+    }
+    if (request.layer != null && request.layer!.namespace.isEmpty) {
+      throw const FiloWindowingException(
+        'createWindow failed: the layer namespace cannot be empty',
+      );
+    }
     final requestPtr = calloc<_WindowRequest>();
     final handlePtr = calloc<_WindowHandle>();
     final titlePtr = request.title == null
         ? nullptr
         : request.title!.toNativeUtf8();
+    final namespacePtr = request.layer == null
+        ? nullptr
+        : request.layer!.namespace.toNativeUtf8();
     try {
       final ref = requestPtr.ref;
       ref.kind = request.kind.index;
@@ -228,6 +282,7 @@ class FiloNativeBackend implements FiloWindowingBackend {
       ref.parentViewId = request.parentViewId;
       ref.preferredViewId = request.preferredViewId;
       _writePositioner(ref.positioner, request.positioner);
+      _writeLayerSurface(ref.layerSurface, request.layer, namespacePtr);
 
       _check(_create(requestPtr, handlePtr), 'createWindow');
 
@@ -254,6 +309,7 @@ class FiloNativeBackend implements FiloWindowingBackend {
       );
     } finally {
       if (titlePtr != nullptr) malloc.free(titlePtr);
+      if (namespacePtr != nullptr) malloc.free(namespacePtr);
       calloc.free(requestPtr);
       calloc.free(handlePtr);
     }
@@ -396,6 +452,19 @@ class FiloNativeBackend implements FiloWindowingBackend {
     }
   }
 
+  @override
+  void updateLayerSurface(int viewId, FiloLayerSurface surface) {
+    final ptr = calloc<_LayerSurface>();
+    final namespacePtr = surface.namespace.toNativeUtf8();
+    try {
+      _writeLayerSurface(ptr.ref, surface, namespacePtr);
+      _check(_updateLayerSurface(viewId, ptr), 'updateLayerSurface');
+    } finally {
+      malloc.free(namespacePtr);
+      calloc.free(ptr);
+    }
+  }
+
   void _forget(int viewId) {
     final record = _windows.remove(viewId);
     record?.observer?.close();
@@ -486,6 +555,39 @@ void _writePositioner(_Positioner out, FiloPositioner? positioner) {
   out.constraintAdjustment = source.constrainsAdjustments?.value ?? 0;
   out.offset.x = source.offset?.x ?? 0;
   out.offset.y = source.offset?.y ?? 0;
+}
+
+void _writeLayerSurface(
+  _LayerSurface out,
+  FiloLayerSurface? layer,
+  Pointer<Utf8> namespace,
+) {
+  if (layer == null) {
+    out.layer = 0;
+    out.anchor = 0;
+    out.exclusiveZone = 0;
+    out.keyboardInteractivity = 0;
+    out.marginTop = 0;
+    out.marginRight = 0;
+    out.marginBottom = 0;
+    out.marginLeft = 0;
+    out.output = -1;
+    out.namespace = nullptr;
+    out.acceptsInput = 1;
+    return;
+  }
+
+  out.layer = layer.layer.value;
+  out.anchor = layer.anchors.value;
+  out.exclusiveZone = layer.exclusiveZone;
+  out.keyboardInteractivity = layer.keyboardInteractivity.value;
+  out.marginTop = layer.margin.top;
+  out.marginRight = layer.margin.right;
+  out.marginBottom = layer.margin.bottom;
+  out.marginLeft = layer.margin.left;
+  out.output = layer.output;
+  out.namespace = namespace;
+  out.acceptsInput = layer.acceptsInput ? 1 : 0;
 }
 
 FiloPositioner _defaultPositioner(Size? size) {

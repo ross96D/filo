@@ -234,6 +234,135 @@ class FiloRegularWindowController extends RegularWindowController
   }
 }
 
+/// A wlr-layer-shell window backed by the Filo embedder.
+///
+/// A layer window is not a regular toplevel: the compositor places it on an
+/// output according to [FiloLayerSurface.layer], [FiloLayerSurface.anchors],
+/// [FiloLayerSurface.margin] and [FiloLayerSurface.exclusiveZone]. It has no
+/// title bar, cannot be moved or resized by the user, and does not appear in
+/// the compositor's window switcher.
+///
+/// It still owns an ordinary Flutter view and renders like any other window.
+class FiloLayerWindowController extends RegularWindowController
+    with FiloWindowControllerMixin {
+  FiloLayerWindowController({
+    required FiloWindowingBackend backend,
+    required RegularWindowControllerDelegate delegate,
+    required FlutterView Function(int viewId) resolveView,
+    required FiloLayerSurface layerSurface,
+    Size? size,
+    BoxConstraints? constraints,
+    bool? sizedToContent,
+  }) : _delegate = delegate,
+       _layerSurface = layerSurface,
+       super.empty() {
+    final handle = backend.createWindow(
+      FiloWindowRequest(
+        kind: FiloWindowKind.layer,
+        size: size,
+        constraints: constraints,
+        resizable: false,
+        sizedToContent: sizedToContent ?? size == null,
+        decorated: false,
+        preferredViewId: -1,
+        layer: layerSurface,
+      ),
+    );
+    try {
+      rootView = resolveView(handle.viewId);
+      initWindow(
+        backend: backend,
+        handle: handle,
+        onClose: () => _delegate.onWindowCloseRequested(this),
+        onDestroy: _delegate.onWindowDestroyed,
+      );
+    } catch (_) {
+      backend.destroyWindow(handle.viewId);
+      rethrow;
+    }
+  }
+
+  final RegularWindowControllerDelegate _delegate;
+  FiloLayerSurface _layerSurface;
+
+  RegularWindowControllerDelegate get delegate => _delegate;
+
+  /// The layer-surface properties currently applied.
+  FiloLayerSurface get layerSurface => _layerSurface;
+
+  @override
+  String get title => windowTitle;
+
+  @override
+  bool get isActivated => false;
+
+  @override
+  bool get isMaximized => false;
+
+  @override
+  bool get isMinimized => false;
+
+  @override
+  bool get isFullscreen => false;
+
+  @override
+  void setSize(Size size) {
+    if (!isDestroyed) backend.setSize(viewId, size);
+  }
+
+  /// Layer surfaces have no title; this is a no-op.
+  @override
+  void setTitle(String title) {}
+
+  @override
+  void activate() {}
+
+  @override
+  void setMaximized(bool maximized) {}
+
+  @override
+  void setMinimized(bool minimized) {}
+
+  @override
+  void setFullscreen(bool fullscreen, {Display? display}) {}
+
+  /// Apply a complete new layer-surface state.
+  void updateLayerSurface(FiloLayerSurface surface) {
+    if (isDestroyed) return;
+    backend.updateLayerSurface(viewId, surface);
+    _layerSurface = surface;
+  }
+
+  void setLayer(FiloLayer layer) {
+    updateLayerSurface(_layerSurface.copyWith(layer: layer));
+  }
+
+  void setAnchors(FiloLayerAnchors anchors) {
+    updateLayerSurface(_layerSurface.copyWith(anchors: anchors));
+  }
+
+  void setExclusiveZone(int zone) {
+    updateLayerSurface(_layerSurface.copyWith(exclusiveZone: zone));
+  }
+
+  void setMargins(FiloInsets margin) {
+    updateLayerSurface(_layerSurface.copyWith(margin: margin));
+  }
+
+  /// Make the surface click-through (false) or interactive (true).
+  void setAcceptsInput(bool acceptsInput) {
+    updateLayerSurface(_layerSurface.copyWith(acceptsInput: acceptsInput));
+  }
+
+  void setKeyboardInteractivity(
+    FiloLayerKeyboardInteractivity keyboardInteractivity,
+  ) {
+    updateLayerSurface(
+      _layerSurface.copyWith(keyboardInteractivity: keyboardInteractivity),
+    );
+  }
+}
+
 /// A dialog window backed by the Filo embedder.
 class FiloDialogWindowController extends DialogWindowController
     with FiloWindowControllerMixin {

@@ -6,20 +6,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Generate Zig bindings for the core Wayland protocol, xdg-shell and the
-    // cursor shapes the mouse cursor platform channel sets.
+    // Generate Zig bindings for the core Wayland protocol, xdg-shell, the
+    // cursor shapes the mouse cursor platform channel sets, and wlr-layer-shell
+    // for layer windows.
     const scanner = Scanner.create(b, .{
         .wayland_xml = b.path("vendor/protocols/wayland.xml"),
         .wayland_protocols = b.path("vendor/protocols"),
     });
     scanner.addCustomProtocol(b.path("vendor/protocols/xdg-shell.xml"));
     scanner.addCustomProtocol(b.path("vendor/protocols/cursor-shape-v1.xml"));
-    scanner.generate("wl_compositor", 5);
+    scanner.addCustomProtocol(b.path("vendor/protocols/wlr-layer-shell-unstable-v1.xml"));
+    scanner.generate("wl_compositor", 6);
     scanner.generate("xdg_wm_base", 6);
     scanner.generate("wl_seat", 8);
     scanner.generate("wl_data_device_manager", 3);
     scanner.generate("wl_output", 4);
     scanner.generate("wp_cursor_shape_manager_v1", 1);
+    scanner.generate("zwlr_layer_shell_v1", 5);
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
 

@@ -8,7 +8,9 @@ library;
 
 export 'src/backend.dart';
 export 'src/bindings.dart';
+export 'src/controllers.dart';
 export 'src/install.dart';
 export 'src/models.dart';
 export 'src/owner.dart';
 export 'src/positioner.dart';
+export 'src/widgets.dart';

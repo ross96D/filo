@@ -10,11 +10,63 @@
 
 const std = @import("std");
 
-/// The two xdg-shell roles. The Dart controller types (regular, dialog,
-/// tooltip, popup, satellite) all map onto one of these plus the request flags.
+/// The roles a window can have. The Dart controller types (regular, dialog,
+/// tooltip, popup, satellite) all map onto `toplevel` or `popup`; `layer` is the
+/// wlr-layer-shell surface used by `FiloLayerWindowController`.
 pub const Kind = enum(i32) {
     toplevel = 0,
     popup = 1,
+    layer = 2,
+};
+
+/// `zwlr_layer_shell_v1.layer`: the z depth of a layer surface.
+pub const Layer = enum(i32) {
+    background = 0,
+    bottom = 1,
+    top = 2,
+    overlay = 3,
+};
+
+/// `zwlr_layer_surface_v1.anchor`, as a bitmask.
+pub const LayerAnchor = struct {
+    pub const top: u32 = 1 << 0;
+    pub const bottom: u32 = 1 << 1;
+    pub const left: u32 = 1 << 2;
+    pub const right: u32 = 1 << 3;
+};
+
+/// `zwlr_layer_surface_v1.keyboard_interactivity`.
+pub const LayerKeyboardInteractivity = enum(i32) {
+    none = 0,
+    exclusive = 1,
+    on_demand = 2,
+};
+
+/// The wlr-layer-shell properties of a layer window. Everything but the
+/// namespace and output can be changed after creation through
+/// `filo_window_update_layer_surface`.
+pub const LayerSurface = extern struct {
+    /// `Layer` value.
+    layer: i32,
+    /// `LayerAnchor` bitmask.
+    anchor: u32,
+    /// Positive reserves space, zero avoids other exclusive zones, -1 ignores
+    /// them entirely.
+    exclusive_zone: i32,
+    /// `LayerKeyboardInteractivity` value.
+    keyboard_interactivity: i32,
+    margin_top: i32,
+    margin_right: i32,
+    margin_bottom: i32,
+    margin_left: i32,
+    /// -1 lets the compositor choose; otherwise an index into the connection's
+    /// outputs in registry order.
+    output: i32,
+    /// NUL-terminated, nullable. Only read during the create call.
+    namespace: ?[*:0]const u8,
+    /// Whether the surface receives pointer/touch input. A wallpaper or
+    /// overlay that should not intercept the desktop sets this to zero.
+    accepts_input: u8,
 };
 
 pub const Size = extern struct {
@@ -66,12 +118,16 @@ pub const WindowRequest = extern struct {
     preferred_view_id: i64,
     /// Popups/satellites.
     positioner: Positioner,
+    /// Layer windows. Ignored for the xdg-shell roles.
+    layer_surface: LayerSurface,
 };
 
 /// The initial state of a created window, so a controller can be fully built
 /// before any event is delivered.
 pub const WindowHandle = extern struct {
     view_id: i64,
+    /// Logical (surface-local) content size. This is the same coordinate space
+    /// as the Dart windowing API and Flutter's logical pixels.
     content_size: Size,
     /// NUL-terminated; valid only for the duration of the create call.
     title: ?[*:0]const u8,
@@ -173,6 +229,7 @@ pub const Host = struct {
         set_fullscreen: *const fn (ctx: ?*anyopaque, view_id: i64, fullscreen: bool) Status,
         set_parent: *const fn (ctx: ?*anyopaque, view_id: i64, parent_view_id: i64) Status,
         update_position: *const fn (ctx: ?*anyopaque, view_id: i64, anchor: ?*const Rect, positioner: ?*const Positioner) Status,
+        update_layer_surface: *const fn (ctx: ?*anyopaque, view_id: i64, layer: *const LayerSurface) Status,
 
         get_size: *const fn (ctx: ?*anyopaque, view_id: i64, out: *Size) Status,
         get_state: *const fn (ctx: ?*anyopaque, view_id: i64, out: *u32) Status,
@@ -232,6 +289,14 @@ pub const Host = struct {
         positioner: ?*const Positioner,
     ) Status {
         return self.vtable.update_position(self.ctx, view_id, anchor, positioner);
+    }
+
+    pub fn updateLayerSurface(
+        self: Host,
+        view_id: i64,
+        layer: *const LayerSurface,
+    ) Status {
+        return self.vtable.update_layer_surface(self.ctx, view_id, layer);
     }
 
     pub fn getSize(self: Host, view_id: i64, out: *Size) Status {
@@ -359,6 +424,14 @@ pub export fn filo_window_update_position(
     return @backingInt(host.updatePosition(view_id, anchor, positioner));
 }
 
+pub export fn filo_window_update_layer_surface(
+    view_id: i64,
+    layer: ?*const LayerSurface,
+) i32 {
+    const value = layer orelse return @backingInt(Status.invalid_argument);
+    return @backingInt(host.updateLayerSurface(view_id, value));
+}
+
 pub export fn filo_window_get_size(view_id: i64, out: ?*Size) i32 {
     const size = out orelse return @backingInt(Status.invalid_argument);
     return @backingInt(host.getSize(view_id, size));
@@ -395,6 +468,13 @@ test "the wire structs use C layout" {
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(WindowHandle, "content_size"));
     try std.testing.expectEqual(@sizeOf(?*const anyopaque), @sizeOf(?[*:0]const u8));
     try std.testing.expect(@sizeOf(WindowRequest) > @sizeOf(WindowHandle));
+
+    // Dart mirrors this struct field for field in `_LayerSurface`.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(LayerSurface, "layer"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(LayerSurface, "output"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(LayerSurface, "namespace"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(LayerSurface, "accepts_input"));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(LayerSurface));
 }
 
 var test_seen: i64 = 0;
@@ -439,6 +519,10 @@ fn testUpdatePosition(_: ?*anyopaque, _: i64, _: ?*const Rect, _: ?*const Positi
     return .unsupported;
 }
 
+fn testUpdateLayerSurface(_: ?*anyopaque, _: i64, _: *const LayerSurface) Status {
+    return .unsupported;
+}
+
 fn testStatusTitle(_: ?*anyopaque, _: i64, _: ?[*:0]const u8) Status {
     return .unsupported;
 }
@@ -475,6 +559,7 @@ test "the exported entry points forward to the host" {
             .set_fullscreen = testStatusBool,
             .set_parent = testStatusParent,
             .update_position = testUpdatePosition,
+            .update_layer_surface = testUpdateLayerSurface,
             .get_size = testGetSize,
             .get_state = testGetU32,
             .get_capabilities = testGetU32,

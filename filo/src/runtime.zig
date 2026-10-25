@@ -96,6 +96,7 @@ pub const Runtime = struct {
             .vulkan_validation = config.vulkan_validation,
             .trace = config.trace,
             .extra_windows = config.extra_windows,
+            .initial_window = config.initial_window,
             .windowing_spike = config.windowing_spike,
             .engine_args = config.engine_args,
         };
@@ -103,9 +104,17 @@ pub const Runtime = struct {
         const conn = try connection.Connection.connect(allocator);
         self.conn = conn;
 
-        const first_win = try conn.createWindow();
-        self.first_win = first_win;
-        try conn.waitReady(first_win);
+        // A layer-only app has no implicit toplevel: the Dart entry point is a
+        // ViewCollection of layer windows. The extra roundtrip dispatches the
+        // output mode events from the binds above so the display metrics are
+        // still known before the first layer window exists.
+        if (config.initial_window) {
+            const first_win = try conn.createWindow();
+            self.first_win = first_win;
+            try conn.waitReady(first_win);
+        } else {
+            try conn.roundtrip();
+        }
 
         // The one loop in the program. Everything below registers a descriptor
         // or a timer with it and does its work from a callback.
@@ -123,6 +132,7 @@ pub const Runtime = struct {
             .vk = &self.vk,
             .channels = platform_channel.Registry.init(),
             .windowing_spike = config.windowing_spike,
+            .allow_empty_views = !config.initial_window,
         };
         self.app_ready = true;
 
@@ -178,9 +188,12 @@ pub const Runtime = struct {
         windowing.install(self.app.toHost());
         self.windowing_installed = true;
 
-        const first_view = try self.app.adoptView(0, first_win);
-        first_view.added = true;
-        self.first_win = null;
+        var first_view: ?*app_mod.View = null;
+        if (self.first_win) |first_win| {
+            first_view = try self.app.adoptView(0, first_win);
+            first_view.?.added = true;
+            self.first_win = null;
+        }
 
         self.ti = text_input.TextInput.init(allocator, eng);
         self.ti_ready = true;
@@ -189,6 +202,7 @@ pub const Runtime = struct {
         self.inp = try input.Input.init(eng, &self.ti);
         self.inp_ready = true;
         self.inp.setViewResolver(&self.app, app_mod.viewForSurface);
+        self.inp.setScaleResolver(&self.app, app_mod.viewScaleForSurface);
         try conn.bindSeat(&self.app.ctx, &self.inp);
 
         self.ph = platform_handler.PlatformHandler.init(
@@ -216,13 +230,19 @@ pub const Runtime = struct {
         };
         self.app.channels.mouse_cursor = &self.mc;
 
-        eng.sendWindowMetricsForView(
-            0,
-            first_view.win.width,
-            first_view.win.height,
-            first_view.win.pixel_ratio,
-            null,
-        );
+        const pixel_ratio: f64 = if (first_view) |view|
+            view.win.pixel_ratio
+        else
+            @floatFromInt(conn.display_scale);
+        if (first_view) |view| {
+            eng.sendWindowMetricsForView(
+                0,
+                view.win.physicalWidth(),
+                view.win.physicalHeight(),
+                view.win.pixel_ratio,
+                null,
+            );
+        }
         // Without this the engine has no display at all and falls back for the
         // refresh rate it derives its frame budget from.
         if (conn.refresh_mhz != 0) {
@@ -230,7 +250,7 @@ pub const Runtime = struct {
                 .refresh_rate = @as(f64, @floatFromInt(conn.refresh_mhz)) / 1000.0,
                 .width = conn.display_width,
                 .height = conn.display_height,
-                .pixel_ratio = first_view.win.pixel_ratio,
+                .pixel_ratio = pixel_ratio,
             });
             std.debug.print("filo: display {}x{} at {d:.3} Hz\n", .{
                 conn.display_width,

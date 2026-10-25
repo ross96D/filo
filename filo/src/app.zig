@@ -14,6 +14,7 @@ const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 
 const engine = @import("engine.zig");
+const scale = @import("scale.zig");
 const connection = @import("wayland/connection.zig");
 const window = @import("wayland/window.zig");
 const frame_clock = @import("wayland/frame_clock.zig");
@@ -48,12 +49,17 @@ pub const View = struct {
     /// The title the bridge last set, kept so the handle/getter can return it.
     title: [256]u8 = @splat(0),
     title_len: usize = 0,
-    /// The size the surface currently has, packed as width << 32 | height.
-    /// `presentView` runs on the raster thread, so it cannot read the
-    /// main-thread window fields directly.
+    /// The physical extent the surface currently has, packed as
+    /// width << 32 | height. This matches the buffer/backing-store pixels
+    /// `presentView` sees. `presentView` runs on the raster thread, so it
+    /// cannot read the main-thread window fields directly.
     content_size: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     /// A content resize is queued or waiting for the popup configure.
     content_resize_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// A buffer-scale change is in flight. Content-size tracking is paused until
+    /// a frame at the new scale has been presented, so an in-flight frame at
+    /// the old scale cannot be mistaken for a content-size change.
+    scale_transition: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     fn packedSize(width: u32, height: u32) u64 {
         return (@as(u64, width) << 32) | @as(u64, height);
@@ -89,10 +95,27 @@ pub const View = struct {
     /// registered callbacks. Runs on the main (UI) thread.
     fn emitWindowEvents(self: *View, eng: *engine.Engine) void {
         if (self.win.resized) {
-            self.updateContentSize(self.win.width, self.win.height);
+            // The cached extent is what the raster thread compares frames
+            // against, so it is physical, like the frame it came from.
+            self.updateContentSize(self.win.physicalWidth(), self.win.physicalHeight());
+        }
+        if (self.win.scale_dirty) {
+            // The raster thread applies this with the first compatible frame;
+            // see `vulkan.Surface.applyPendingBufferScale`. Content tracking is
+            // paused until that frame arrives, so the old physical extent is
+            // not mistaken for a content change.
+            self.scale_transition.store(self.win.bufferScale(), .release);
+            self.surface.requestBufferScale(self.win.bufferScale());
+        }
+        if (self.win.resized or self.win.scale_dirty) {
+            const resized = self.win.resized;
+            // applyResize sends physical metrics and clears both flags.
             self.win.applyResize(eng, self.id);
-            if (self.callbacks.on_configure) |on_configure| {
-                on_configure(@intCast(self.win.width), @intCast(self.win.height));
+            if (resized) {
+                // The controller-facing size is logical/surface-local.
+                if (self.callbacks.on_configure) |on_configure| {
+                    on_configure(@intCast(self.win.width), @intCast(self.win.height));
+                }
             }
         }
         if (self.win.popup_configured) {
@@ -149,6 +172,13 @@ pub const App = struct {
     /// event loop, to prove `AddView` completes synchronously on this thread.
     windowing_spike: bool = false,
     windowing_spike_done: bool = false,
+    /// A layer-only app starts with no views. Keep the loop alive until the
+    /// framework creates its first one instead of treating zero views as
+    /// "everything closed".
+    allow_empty_views: bool = false,
+    /// Whether any view has ever been registered. Once it has, zero views means
+    /// the app is done.
+    saw_view: bool = false,
     /// The loop sources are only registered once, by `runLoop`.
     loop_sources_added: bool = false,
 
@@ -171,10 +201,12 @@ pub const App = struct {
             self.vk,
             @ptrCast(self.ctx.conn.display),
             @ptrCast(win.surface),
-            win.width,
-            win.height,
+            win.physicalWidth(),
+            win.physicalHeight(),
+            win.transparent,
         );
         errdefer surface.destroy();
+        surface.requestBufferScale(win.bufferScale());
 
         const view = try self.ctx.allocator.create(View);
         errdefer self.ctx.allocator.destroy(view);
@@ -183,7 +215,7 @@ pub const App = struct {
             .win = win,
             .surface = surface,
         };
-        view.updateContentSize(win.width, win.height);
+        view.updateContentSize(win.physicalWidth(), win.physicalHeight());
 
         try self.frame_clock.?.addSurface(win.surface);
         errdefer self.frame_clock.?.removeSurface(win.surface);
@@ -195,6 +227,7 @@ pub const App = struct {
         try self.views_by_surface.put(self.ctx.allocator, win.surface, view);
         errdefer _ = self.views_by_surface.remove(win.surface);
 
+        self.saw_view = true;
         return view;
     }
 
@@ -248,8 +281,8 @@ pub const App = struct {
                 if (req.sized_to_content != 0) {
                     self.ctx.eng.sendWindowMetricsForView(
                         view.id,
-                        view.win.width,
-                        view.win.height,
+                        view.win.physicalWidth(),
+                        view.win.physicalHeight(),
                         view.win.pixel_ratio,
                         view.win.metricsConstraints(),
                     );
@@ -371,6 +404,68 @@ pub const App = struct {
         return try self.adoptView(id, win);
     }
 
+    /// Create a wlr-layer-shell surface from a windowing request.
+    fn createLayer(self: *App, req: *const windowing.WindowRequest) !*View {
+        const state = req.layer_surface;
+        const output = if (state.output < 0)
+            null
+        else blk: {
+            const index: usize = @intCast(state.output);
+            const outputs = self.ctx.conn.outputs.items;
+            if (index >= outputs.len) return error.UnknownOutput;
+            break :blk outputs[index];
+        };
+
+        const anchors = state.anchor;
+        const horizontal = anchors & windowing.LayerAnchor.left != 0 and
+            anchors & windowing.LayerAnchor.right != 0;
+        const vertical = anchors & windowing.LayerAnchor.top != 0 and
+            anchors & windowing.LayerAnchor.bottom != 0;
+        const sized_to_content = req.sized_to_content != 0;
+
+        const width = layerDimension(
+            req.size.width,
+            horizontal,
+            sized_to_content,
+            @max(1, @min(req.min_size.width, max_content_size)),
+            800,
+        );
+        const height = layerDimension(
+            req.size.height,
+            vertical,
+            sized_to_content,
+            @max(1, @min(req.min_size.height, max_content_size)),
+            600,
+        );
+
+        const id = self.reserveViewId();
+        const win = try self.ctx.conn.createLayer(.{
+            .state = state,
+            .output = output,
+            .namespace = if (state.namespace) |namespace| namespace else "filo",
+            .width = width,
+            .height = height,
+        });
+        var owned = true;
+        errdefer if (owned) win.destroy(self.ctx.allocator);
+
+        // The configure that `waitReady` blocks for may leave a dimension to
+        // the client. Give the engine something valid to draw at; the first
+        // frame can still change it.
+        win.applyRequest(req);
+        try self.ctx.conn.waitReady(win);
+        if (win.width == 0) win.width = 800;
+        if (win.height == 0) win.height = 600;
+
+        const view = try self.adoptView(id, win);
+        owned = false;
+
+        // The initial state is returned in the handle; do not replay it as
+        // events once the caller registers its callbacks.
+        view.win.resized = false;
+        return view;
+    }
+
     /// Create a view and tell the engine about it. Resources exist before the
     /// asynchronous add starts, so a frame presented for it can always find its
     /// surface.
@@ -388,8 +483,8 @@ pub const App = struct {
         op.* = .{ .app = self, .view = view, .kind = .add };
         self.ctx.eng.addView(
             view.id,
-            view.win.width,
-            view.win.height,
+            view.win.physicalWidth(),
+            view.win.physicalHeight(),
             view.win.pixel_ratio,
             view.win.metricsConstraints(),
             op,
@@ -555,7 +650,13 @@ pub const App = struct {
         // popup has to ask the compositor for that size before its first frame
         // can be shown; a toplevel can show the frame and then update its
         // native size and metrics.
-        if (view.win.isTrackingContentSize() and
+        //
+        // While a buffer-scale change is in flight the frame extent also changes
+        // (logical size * new scale), which is not a content change: skip the
+        // comparison until a frame at the new scale has been presented.
+        const scale_transition = view.scale_transition.load(.acquire);
+        if (scale_transition == 0 and
+            view.win.isTrackingContentSize() and
             (width != view.contentWidth() or height != view.contentHeight()))
         {
             self.postContentResize(view, width, height);
@@ -566,6 +667,13 @@ pub const App = struct {
             std.debug.print("filo: compositor present failed for view {}: {}\n", .{ info.view_id, err });
             return false;
         };
+
+        // The new scale is now applied. Adopt the frame just presented as the
+        // content-size baseline so later frames compare like with like.
+        if (scale_transition != 0 and view.surface.buffer_scale == scale_transition) {
+            view.updateContentSize(width, height);
+            view.scale_transition.store(0, .release);
+        }
         return true;
     }
 
@@ -583,6 +691,7 @@ pub const App = struct {
             .set_fullscreen = bridgeSetFullscreen,
             .set_parent = bridgeSetParent,
             .update_position = bridgeUpdatePosition,
+            .update_layer_surface = bridgeUpdateLayerSurface,
             .get_size = bridgeGetSize,
             .get_state = bridgeGetState,
             .get_capabilities = bridgeGetCapabilities,
@@ -614,6 +723,19 @@ pub const App = struct {
                 return switch (err) {
                     error.UnknownParent => .unknown_view,
                     error.InvalidParent => .invalid_argument,
+                    else => .backend_failed,
+                };
+            },
+            .layer => app.createLayer(req) catch |err| {
+                std.debug.print("filo: windowing create: could not create layer surface: {}\n", .{err});
+                return switch (err) {
+                    error.LayerShellUnavailable => .unsupported,
+                    error.UnknownOutput,
+                    error.InvalidLayer,
+                    error.InvalidSize,
+                    error.InvalidKeyboardInteractivity,
+                    error.UnsupportedKeyboardInteractivity,
+                    => .invalid_argument,
                     else => .backend_failed,
                 };
             },
@@ -681,9 +803,16 @@ pub const App = struct {
         view_id: i64,
         size: windowing.Size,
     ) windowing.Status {
-        _ = ctx;
-        _ = view_id;
-        _ = size;
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        // xdg-shell leaves resizing to the compositor, but a layer surface's
+        // size is a client request.
+        if (view.win.isLayer()) {
+            if (!window.layerSizeValid(view.win.layer_state.anchor, size.width, size.height)) {
+                return .invalid_argument;
+            }
+            view.win.setSize(size);
+        }
         return .ok;
     }
 
@@ -791,6 +920,28 @@ pub const App = struct {
         return .ok;
     }
 
+    fn bridgeUpdateLayerSurface(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        layer: *const windowing.LayerSurface,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        if (!view.win.isLayer()) return .unsupported;
+        // The input region is a wl_surface request, not layer-shell state.
+        app.ctx.conn.setSurfaceInputRegion(view.win.surface, layer.accepts_input != 0) catch
+            return .backend_failed;
+        view.win.applyLayerSurface(layer.*) catch |err| return switch (err) {
+            error.NotALayerSurface => .unsupported,
+            error.InvalidLayer,
+            error.InvalidSize,
+            error.InvalidKeyboardInteractivity,
+            error.UnsupportedKeyboardInteractivity,
+            => .invalid_argument,
+        };
+        return .ok;
+    }
+
     fn bridgeGetSize(
         ctx: ?*anyopaque,
         view_id: i64,
@@ -866,6 +1017,27 @@ fn makePositioner(app: *App, p: windowing.Positioner) !*xdg.Positioner {
     return positioner;
 }
 
+/// Pick the size to request for one layer-surface dimension.
+///
+/// A zero request is only legal for a dimension anchored to opposite edges; in
+/// that case the compositor chooses the size. Otherwise fall back to the
+/// minimum constraint (content sizing) or a sane default, so the initial commit
+/// is always valid.
+fn layerDimension(
+    requested: u32,
+    opposite_anchors: bool,
+    sized_to_content: bool,
+    minimum: u32,
+    fallback: u32,
+) u32 {
+    if (requested != 0) return @min(requested, 16_384);
+    // Anchoring to opposite edges makes the compositor own the dimension, even
+    // when the window otherwise sizes to its content.
+    if (opposite_anchors) return 0;
+    if (sized_to_content) return @max(1, minimum);
+    return fallback;
+}
+
 fn anchorFromInt(value: i32) xdg.Positioner.Anchor {
     return switch (value) {
         0 => .none,
@@ -906,7 +1078,9 @@ const ViewOp = struct {
     ok: bool = false,
 };
 
-/// Baton for a resize requested by a rendered frame.
+/// Baton for a resize requested by a rendered frame. `width`/`height` are the
+/// physical backing-store extent; `runContentResize` converts them to logical
+/// before touching xdg-shell or layer-shell.
 const ContentResizeRequest = struct {
     app: *App,
     view_id: engine.ViewId,
@@ -924,8 +1098,12 @@ fn runContentResize(user_data: ?*anyopaque) void {
         return;
     }
 
-    const width = @max(1, @min(req.width, 16_384));
-    const height = @max(1, @min(req.height, 16_384));
+    // `req` is the extent the raster thread drew at, in physical pixels.
+    const physical_width = @max(1, @min(req.width, 16_384));
+    const physical_height = @max(1, @min(req.height, 16_384));
+    // Wayland surface and positioner sizes are surface-local/logical.
+    const width = scale.logical(physical_width, view.win.pixel_ratio);
+    const height = scale.logical(physical_height, view.win.pixel_ratio);
 
     if (view.win.isPopup()) {
         var positioner = view.win.positioner;
@@ -946,7 +1124,7 @@ fn runContentResize(user_data: ?*anyopaque) void {
     }
 
     view.win.applyContentSize(width, height);
-    view.updateContentSize(width, height);
+    view.updateContentSize(physical_width, physical_height);
     // Wait for the compositor to confirm the size before tracking again. A
     // tiled compositor may keep its own size, and resubmitting the frame size
     // every frame would never converge.
@@ -1021,8 +1199,8 @@ fn addViewSyncCallback(result: [*c]const c.FlutterAddViewResult) callconv(.c) vo
 fn beginAddViewSync(self: *App, view: *View) !void {
     try self.ctx.eng.addView(
         view.id,
-        view.win.width,
-        view.win.height,
+        view.win.physicalWidth(),
+        view.win.physicalHeight(),
         view.win.pixel_ratio,
         view.win.metricsConstraints(),
         view,
@@ -1130,6 +1308,68 @@ fn runWindowingSpike(self: *App) void {
             .{ offset.x, offset.y },
         );
         _ = windowing.filo_window_destroy(popup_handle.view_id);
+    }
+
+    // A layer surface: zwlr_layer_shell_v1, anchored to the top-right.
+    var layer_request = std.mem.zeroes(windowing.WindowRequest);
+    layer_request.kind = @backingInt(windowing.Kind.layer);
+    layer_request.size = .{ .width = 0, .height = 200 };
+    layer_request.min_size = .{ .width = 1, .height = 1 };
+    layer_request.decorated = 0;
+    layer_request.preferred_view_id = -1;
+    layer_request.layer_surface = .{
+        .layer = @backingInt(windowing.Layer.top),
+        .anchor = windowing.LayerAnchor.top |
+            windowing.LayerAnchor.left |
+            windowing.LayerAnchor.right,
+        .exclusive_zone = 0,
+        .keyboard_interactivity = @backingInt(windowing.LayerKeyboardInteractivity.on_demand),
+        .margin_top = 16,
+        .margin_right = 16,
+        .margin_bottom = 0,
+        .margin_left = 0,
+        .output = -1,
+        .namespace = "filo layer spike",
+        .accepts_input = 1,
+    };
+
+    var layer_handle = std.mem.zeroes(windowing.WindowHandle);
+    const layer_result = windowing.filo_window_create(&layer_request, &layer_handle);
+    std.debug.print(
+        "filo: windowing spike layer rc={} view={} size={}x{}\n",
+        .{
+            layer_result,
+            layer_handle.view_id,
+            layer_handle.content_size.width,
+            layer_handle.content_size.height,
+        },
+    );
+
+    if (layer_result == 0) {
+        _ = windowing.filo_window_observe(
+            layer_handle.view_id,
+            spikeOnConfigure,
+            spikeOnState,
+            spikeOnCapabilities,
+            null,
+            spikeOnMoved,
+            spikeOnClose,
+            null,
+        );
+
+        var moved = layer_request.layer_surface;
+        moved.layer = @backingInt(windowing.Layer.bottom);
+        moved.anchor = windowing.LayerAnchor.left | windowing.LayerAnchor.right;
+        moved.exclusive_zone = -1;
+        _ = windowing.filo_window_update_layer_surface(layer_handle.view_id, &moved);
+
+        var layer_size = std.mem.zeroes(windowing.Size);
+        _ = windowing.filo_window_get_size(layer_handle.view_id, &layer_size);
+        std.debug.print(
+            "filo: windowing spike layer size after update={}x{}\n",
+            .{ layer_size.width, layer_size.height },
+        );
+        _ = windowing.filo_window_destroy(layer_handle.view_id);
     }
 
     _ = windowing.filo_window_destroy(handle.view_id);
@@ -1301,6 +1541,15 @@ pub fn viewForSurface(user_data: ?*anyopaque, surface: *wl.Surface) ?engine.View
     return view.id;
 }
 
+/// The buffer scale of the view that owns `surface`, for pointer events. The
+/// pointer must convert its surface-local position to the physical pixels the
+/// Flutter embedder expects.
+pub fn viewScaleForSurface(user_data: ?*anyopaque, surface: *wl.Surface) f64 {
+    const app: *App = @ptrCast(@alignCast(user_data.?));
+    const view = app.views_by_surface.get(surface) orelse return 1.0;
+    return view.win.pixel_ratio;
+}
+
 /// Invoked by the engine (on the engine thread) for every platform message the
 /// framework sends to the embedder. Every message must be answered; the actual
 /// routing lives in `flutter/platform_channel.zig`.
@@ -1452,13 +1701,29 @@ fn onPlatformWake(loop: *ev.Loop, completion: *ev.Completion) void {
 /// the connection.
 fn afterDispatch(self: *App, loop: *ev.Loop) void {
     if (self.views.items.len == 0) {
-        loop.stop();
-        return;
+        // A layer-only app starts with no implicit view; wait for the
+        // framework to create its first layer window. After any view has
+        // existed, zero views still means the app is done.
+        if (!self.allow_empty_views or self.saw_view) {
+            loop.stop();
+            return;
+        }
     }
 
     if (self.windowing_spike and !self.windowing_spike_done) {
         self.windowing_spike_done = true;
         runWindowingSpike(self);
+    }
+
+    // The compositor changed the output scale. Windows that receive a
+    // per-surface preferred scale follow it themselves; the output-wide value
+    // is only a fallback for older compositors.
+    if (self.ctx.conn.scale_dirty) {
+        self.ctx.conn.scale_dirty = false;
+        const ratio: f64 = @floatFromInt(self.ctx.conn.display_scale);
+        for (self.views.items) |view| {
+            if (!view.win.scale_from_compositor) view.win.setPixelRatio(ratio);
+        }
     }
 
     for (self.views.items) |view| {
@@ -1544,7 +1809,7 @@ pub fn runLoop(app: *App) !void {
     app.platform_probe.c.flags.rearm = true;
     app.ctx.loop.add(&app.platform_probe.c);
 
-    std.debug.print("filo: window created, entering event loop\n", .{});
+    std.debug.print("filo: entering event loop\n", .{});
     try app.ctx.loop.run();
     if (app.err) |err| return err;
 }
@@ -1558,4 +1823,20 @@ pub fn requestStop(app: *App) void {
 fn stopLoop(user_data: ?*anyopaque) void {
     const app: *App = @ptrCast(@alignCast(user_data.?));
     app.ctx.loop.stop();
+}
+
+test "a layer dimension follows its anchors before content sizing" {
+    const testing = std.testing;
+
+    // An explicit size wins.
+    try testing.expectEqual(@as(u32, 320), layerDimension(320, true, true, 10, 800));
+    // Opposite anchors hand the dimension to the compositor, even for a
+    // content-sized surface.
+    try testing.expectEqual(@as(u32, 0), layerDimension(0, true, true, 10, 800));
+    // Content sizing without opposite anchors uses the minimum as a
+    // placeholder until the first frame.
+    try testing.expectEqual(@as(u32, 10), layerDimension(0, false, true, 10, 800));
+    // Otherwise a sane default keeps the initial commit valid.
+    try testing.expectEqual(@as(u32, 800), layerDimension(0, false, false, 10, 800));
+    try testing.expectEqual(@as(u32, 1), layerDimension(0, false, true, 0, 800));
 }

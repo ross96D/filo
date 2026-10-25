@@ -31,7 +31,7 @@ may create a new view and return another id.
 
 | Field | Meaning |
 | --- | --- |
-| `kind` | `toplevel` or `popup` |
+| `kind` | `toplevel`, `popup`, or `layer` |
 | `size` | Preferred logical content size; null means size to content |
 | `constraints` | Logical min/max size constraints |
 | `resizable` | Whether the user may resize after creation |
@@ -42,6 +42,7 @@ may create a new view and return another id.
 | `parentViewId` | Parent window view id, or -1 |
 | `preferredViewId` | Suggested view id to adopt (usually 0), or -1 |
 | `positioner` | Popup/tooltip placement, including its anchor rect |
+| `layer` | Layer-shell properties, required for `layer` windows |
 
 All `Size`, `Rect`, and `Offset` values are **logical pixels**. Convert to
 physical or native coordinates in the backend using the view's device pixel
@@ -106,6 +107,7 @@ The remaining methods are also synchronous:
 - `setMinimized`
 - `setFullscreen`
 - `updatePosition`
+- `updateLayerSurface`
 - `setParent`
 
 They may enqueue native work, but they must not return a controller or a view id
@@ -136,6 +138,30 @@ The native window and its Flutter view are gone. Invoke this for:
 
 The controller marks itself destroyed and calls its delegate's
 `onWindowDestroyed` exactly once.
+
+## Layer windows
+
+A `layer` request creates a `zwlr_layer_shell_v1` surface. `request.layer`
+carries:
+
+| Field | Meaning |
+| --- | --- |
+| `layer` | `background`, `bottom`, `top`, or `overlay` |
+| `anchors` | An edge bitmask (`top`, `bottom`, `left`, `right`) |
+| `exclusiveZone` | Reserved space; -1 ignores other zones |
+| `keyboardInteractivity` | `none`, `exclusive`, or `onDemand` |
+| `margin` | Distance from the anchored edges |
+| `output` | Registry index of the target output, or -1 |
+| `namespace` | Non-empty role namespace, e.g. `my-bar` |
+| `acceptsInput` | Whether the surface receives pointer/touch input |
+
+The backend must reject a zero width or height that is not anchored to both
+opposite edges. The output and namespace are fixed at creation;
+`updateLayerSurface` applies the remaining double-buffered properties. A
+compositor without wlr-layer-shell reports the create as unsupported (status 3).
+
+Layer surfaces may be transparent; the Filo embedder presents them with
+premultiplied alpha when the compositor supports it.
 
 ## Parent and child windows
 
