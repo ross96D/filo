@@ -70,7 +70,7 @@ class _WindowHostState extends State<WindowHost> {
         // embedder creates this surface before Dart starts, and the controller
         // adopts it without reconfiguring it.
         layer: FiloLayer.top,
-        anchors: FiloLayerAnchors.top | FiloLayerAnchors.right,
+        anchors: FiloLayerAnchors.bottom | FiloLayerAnchors.left,
         keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
         margin: const FiloInsets(top: 8, right: 8),
         namespace: 'filo',

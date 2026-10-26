@@ -555,7 +555,6 @@ pub const App = struct {
             view.win.configured = false;
             view.win.setSize(size);
             try view.win.applyLayerSurface(state);
-            try self.ctx.conn.waitReady(view.win);
         }
 
         self.notifyAdoptedView(view);
