@@ -30,25 +30,18 @@ pub const View = struct {
     id: engine.ViewId,
     win: *window.Window,
     surface: vulkan.Surface,
-    /// The engine has confirmed that the view exists.
-    added: bool = false,
-    /// Set by the synchronous AddView callback when the engine refused the view.
-    add_failed: bool = false,
-    /// A close was requested while the engine was still adding the view.
-    close_requested: bool = false,
+    /// Where this view is in the engine's AddView/RemoveView lifecycle.
+    engine_state: EngineState = .adding,
+    /// A close request arrived before AddView completed; apply it after add.
+    close_after_add: bool = false,
     /// `filo_window_destroy` asked for this view to go away.
     destroy_requested: bool = false,
-    /// RemoveView has been started; the surface must stay alive until it
-    /// reports success.
-    removing: bool = false,
-    /// RemoveView was rejected synchronously (invalid or unknown id); do not
-    /// retry it every frame.
-    remove_failed: bool = false,
-    /// Backend callbacks registered through `filo_window_observe`.
+    /// Backend callbacks registered through `filo_window_observe`. Null means
+    /// no controller is observing this view.
     callbacks: windowing.WindowCallbacks = windowing.empty_callbacks,
     /// The title the bridge last set, kept so the handle/getter can return it.
+    /// NUL-terminated.
     title: [256]u8 = @splat(0),
-    title_len: usize = 0,
     /// The extent of the last frame observed for this view, packed as
     /// width << 32 | height. It starts at the native window size at adoption
     /// and is updated from presented frames, never from a compositor
@@ -67,6 +60,20 @@ pub const View = struct {
     /// a frame at the new scale has been presented, so an in-flight frame at
     /// the old scale cannot be mistaken for a content-size change.
     scale_transition: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    /// The states the engine's AddView/RemoveView lifecycle can be in.
+    pub const EngineState = enum {
+        /// AddView has not reported success yet.
+        adding,
+        /// The engine owns a view with this id.
+        added,
+        /// AddView refused the view.
+        add_failed,
+        /// RemoveView is in flight.
+        removing,
+        /// RemoveView was rejected; do not retry.
+        remove_failed,
+    };
 
     fn packedSize(width: u32, height: u32) u64 {
         return (@as(u64, width) << 32) | @as(u64, height);
@@ -91,7 +98,6 @@ pub const View = struct {
         const n = @min(src.len, self.title.len - 1);
         @memcpy(self.title[0..n], src[0..n]);
         self.title[n] = 0;
-        self.title_len = n;
     }
 
     fn viewTitleZ(self: *View) [*:0]const u8 {
@@ -127,7 +133,9 @@ pub const View = struct {
             .toplevel => |*toplevel| {
                 if (toplevel.state_dirty) {
                     toplevel.state_dirty = false;
-                    if (self.callbacks.on_state) |on_state| on_state(toplevel.toplevelState());
+                    if (self.callbacks) |callbacks| {
+                        if (callbacks.on_state) |on_state| on_state(toplevel.toplevelState());
+                    }
                 }
                 if (toplevel.capabilities_dirty) {
                     toplevel.capabilities_dirty = false;
@@ -374,7 +382,7 @@ pub const App = struct {
     /// in the engine, so it must never go through `AddView`.
     fn adoptToplevelView(self: *App, view: *View, req: *const windowing.WindowRequest) !*View {
         self.implicit_adopted = true;
-        view.added = true;
+        view.engine_state = .added;
 
         view.win.applyRequest(req);
         const toplevel = &view.win.role.toplevel;
@@ -508,7 +516,7 @@ pub const App = struct {
                 const view = try self.adoptView(0, win);
                 owned = false;
                 self.implicit_adopted = true;
-                view.added = true;
+                view.engine_state = .added;
                 self.notifyAdoptedView(view);
                 view.win.resized = false;
                 return view;
@@ -563,7 +571,7 @@ pub const App = struct {
     /// request. Used on hot restart, when view 0 survives the isolate.
     fn readoptLayerView(self: *App, view: *View, req: *const windowing.WindowRequest) !*View {
         self.implicit_adopted = true;
-        view.added = true;
+        view.engine_state = .added;
 
         const state = req.layer_surface;
         const size = layerRequestSize(req);
@@ -898,7 +906,7 @@ pub const App = struct {
             },
         };
 
-        if (!view.added) {
+        if (view.engine_state == .adding) {
             std.debug.print("filo: adding view\n", .{});
             beginAddViewSync(app, view) catch |err| {
                 std.debug.print("filo: windowing create: AddView failed: {}\n", .{err});
@@ -1203,7 +1211,7 @@ pub const App = struct {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
         if (len == 0) return .ok;
-        const n = @min(view.title_len, @as(usize, len) - 1);
+        const n = @min(std.mem.len(view.viewTitleZ()), @as(usize, len) - 1);
         @memcpy(buf[0..n], view.title[0..n]);
         buf[n] = 0;
         return .ok;
@@ -1416,21 +1424,22 @@ fn runViewOp(user_data: ?*anyopaque) void {
 
     switch (op.kind) {
         .add => if (op.ok) {
-            view.added = true;
+            view.engine_state = .added;
             std.debug.print("filo: view {} added\n", .{view.id});
-            if (view.close_requested) view.win.closing = true;
+            if (view.close_after_add) view.win.closing = true;
         } else {
             std.debug.print("filo: view {} could not be added\n", .{view.id});
             app.destroyView(view);
         },
         .remove => if (op.ok) {
             std.debug.print("filo: view {} removed\n", .{view.id});
-            if (view.callbacks.on_destroy) |on_destroy| on_destroy();
+            if (view.callbacks) |callbacks| {
+                if (callbacks.on_destroy) |on_destroy| on_destroy();
+            }
             app.destroyView(view);
         } else {
             std.debug.print("filo: view {} could not be removed\n", .{view.id});
-            view.removing = false;
-            view.remove_failed = true;
+            view.engine_state = .remove_failed;
         },
     }
 
@@ -1449,9 +1458,9 @@ fn addViewSyncCallback(result: [*c]const c.FlutterAddViewResult) callconv(.c) vo
     if (result == null or result.*.user_data == null) return;
     const view: *View = @ptrCast(@alignCast(result.*.user_data.?));
     if (result.*.added) {
-        view.added = true;
+        view.engine_state = .added;
     } else {
-        view.add_failed = true;
+        view.engine_state = .add_failed;
     }
 }
 
@@ -1469,9 +1478,11 @@ fn beginAddViewSync(self: *App, view: *View) !void {
         view,
         addViewSyncCallback,
     );
-    if (view.added) return;
-    if (view.add_failed) return error.AddViewFailed;
-    return error.AddViewNotSynchronous;
+    switch (view.engine_state) {
+        .added => return,
+        .add_failed => return error.AddViewFailed,
+        else => return error.AddViewNotSynchronous,
+    }
 }
 
 /// `FILO_WINDOWING_SPIKE`: exercise the exported create path from the event
@@ -1488,7 +1499,7 @@ fn runWindowingSpike(self: *App) void {
 
     var handle = std.mem.zeroes(windowing.WindowHandle);
     const result = windowing.filo_window_create(&request, &handle);
-    const added = if (self.viewForId(handle.view_id)) |view| view.added else false;
+    const added = if (self.viewForId(handle.view_id)) |view| view.engine_state == .added else false;
     std.debug.print(
         "filo: windowing spike create rc={} view={} added_synchronously={}\n",
         .{ result, handle.view_id, added },
@@ -1941,11 +1952,11 @@ fn runCloseWindow(user_data: ?*anyopaque) void {
         req.app.ctx.loop.stop();
         return;
     }
-    if (!view.added) {
-        view.close_requested = true;
-        return;
+    switch (view.engine_state) {
+        .adding => view.close_after_add = true,
+        .added => view.win.closing = true,
+        .add_failed, .removing, .remove_failed => {},
     }
-    view.win.closing = true;
 }
 
 const CursorRequest = struct {
@@ -2045,23 +2056,22 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
                 loop.stop();
                 return;
             }
-            // The engine is still adding this view; remove it once the add
-            // callback says it exists.
-            if (!view.added) {
-                view.close_requested = true;
-                continue;
-            }
-            if (!view.removing and !view.remove_failed) {
-                view.removing = true;
-                self.beginRemoveView(view) catch |err| {
-                    std.debug.print("filo: could not remove view {}: {}\n", .{ view.id, err });
-                    view.removing = false;
-                    view.remove_failed = true;
-                };
+            switch (view.engine_state) {
+                // The engine is still adding this view; remove it once the add
+                // callback says it exists.
+                .adding => view.close_after_add = true,
+                .added => {
+                    view.engine_state = .removing;
+                    self.beginRemoveView(view) catch |err| {
+                        std.debug.print("filo: could not remove view {}: {}\n", .{ view.id, err });
+                        view.engine_state = .remove_failed;
+                    };
+                },
+                .removing, .remove_failed, .add_failed => {},
             }
             continue;
         }
-        if (view.added) view.emitWindowEvents(self.ctx.eng);
+        if (view.engine_state == .added) view.emitWindowEvents(self.ctx.eng);
     }
 
     self.ctx.eng.frame_period_ns = self.ctx.conn.frame_period_ns;

@@ -214,7 +214,7 @@ pub const Runtime = struct {
         var first_view: ?*app_mod.View = null;
         if (self.first_win) |first_win| {
             first_view = try self.app.adoptView(0, first_win);
-            first_view.?.added = true;
+            first_view.?.engine_state = .added;
             self.first_win = null;
         }
 
