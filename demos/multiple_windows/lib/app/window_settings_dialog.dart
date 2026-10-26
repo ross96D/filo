@@ -13,6 +13,8 @@ import 'models.dart';
 Future<void> showWindowSettingsDialog(BuildContext context, WindowSettings settings) {
   return showDialog(
     context: context,
+    // force to set a size
+    fullscreenDialog: true,
     builder: (BuildContext ctx) {
       return _WindowSettingsEditor(
         settings: settings,
@@ -90,7 +92,6 @@ class _WindowSettingsEditorState extends State<_WindowSettingsEditor> {
       contentPadding: const EdgeInsets.all(4),
       titlePadding: const EdgeInsets.fromLTRB(24, 10, 24, 0),
       title: const Center(child: Text('Window Settings')),
-      constraints: BoxConstraints.tight(Size(300, 300)),
       children: [
         SizedBox(
           width: size.width * 0.7,
