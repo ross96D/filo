@@ -45,7 +45,7 @@ pub const Runtime = struct {
     loop: ev.Loop = undefined,
     loop_ready: bool = false,
     conn: ?*connection.Connection = null,
-    /// The initial window, until it is handed to the implicit view.
+    /// The bootstrap toplevel, until the first window controller adopts view 0.
     first_win: ?*window.Window = null,
     vk: vulkan.Context = undefined,
     vk_ready: bool = false,
@@ -67,8 +67,9 @@ pub const Runtime = struct {
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ran: bool = false,
 
-    /// Build the whole embedder: connection, window, loop, Vulkan, engine,
-    /// handlers and the implicit view. Every failure unwinds through `deinit`.
+    /// Build the whole embedder: connection, loop, Vulkan, engine and handlers.
+    /// No window is created here; the first windowing request creates the
+    /// implicit view's native surface. Every failure unwinds through `deinit`.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -95,8 +96,7 @@ pub const Runtime = struct {
             .force_impeller = config.force_impeller,
             .vulkan_validation = config.vulkan_validation,
             .trace = config.trace,
-            .extra_windows = config.extra_windows,
-            .initial_window = config.initial_window,
+            .layer_only = config.layer_only,
             .windowing_spike = config.windowing_spike,
             .engine_args = config.engine_args,
         };
@@ -104,16 +104,40 @@ pub const Runtime = struct {
         const conn = try connection.Connection.connect(allocator);
         self.conn = conn;
 
-        // A layer-only app has no implicit toplevel: the Dart entry point is a
-        // ViewCollection of layer windows. The extra roundtrip dispatches the
-        // output mode events from the binds above so the display metrics are
-        // still known before the first layer window exists.
-        if (config.initial_window) {
-            const first_win = try conn.createWindow();
+        if (config.layer_only) {
+            // Bootstrap the implicit view with the configured layer surface.
+            // The first layer controller adopts it; the surface exists before
+            // the engine, so its first frame follows the same startup path as
+            // a regular window.
+            var state = std.mem.zeroes(windowing.LayerSurface);
+            const boot = config.layer_bootstrap;
+            state.layer = boot.layer;
+            state.anchor = boot.anchor;
+            state.exclusive_zone = boot.exclusive_zone;
+            state.keyboard_interactivity = boot.keyboard_interactivity;
+            state.margin_top = boot.margin_top;
+            state.margin_right = boot.margin_right;
+            state.margin_bottom = boot.margin_bottom;
+            state.margin_left = boot.margin_left;
+            state.output = -1;
+            state.accepts_input = if (boot.accepts_input) 1 else 0;
+            const first_win = try conn.createLayer(.{
+                .state = state,
+                .output = null,
+                .namespace = boot.namespace.ptr,
+                .width = boot.width,
+                .height = boot.height,
+            });
             self.first_win = first_win;
             try conn.waitReady(first_win);
         } else {
-            try conn.roundtrip();
+            // Bootstrap the implicit view's toplevel before the engine starts.
+            // The first regular window adopts it; creating that surface later,
+            // from a Dart callback, leaves the toplevel's first frame
+            // unpainted.
+            const first_win = try conn.createWindow();
+            self.first_win = first_win;
+            try conn.waitReady(first_win);
         }
 
         // The one loop in the program. Everything below registers a descriptor
@@ -132,7 +156,6 @@ pub const Runtime = struct {
             .vk = &self.vk,
             .channels = platform_channel.Registry.init(),
             .windowing_spike = config.windowing_spike,
-            .allow_empty_views = !config.initial_window,
         };
         self.app_ready = true;
 
@@ -259,14 +282,9 @@ pub const Runtime = struct {
             });
         }
 
-        // A way to exercise multi-view rendering without clicking anything.
-        var extra: u32 = 0;
-        while (extra < config.extra_windows) : (extra += 1) {
-            _ = self.app.spawnView(800, 600) catch |err| {
-                std.debug.print("filo: could not open extra window: {}\n", .{err});
-                break;
-            };
-        }
+        // A way to exercise multi-view rendering without clicking anything is
+        // intentionally left to the Dart app: creating a view from the embedder
+        // before the first app window would race the engine's first frame.
 
         return self;
     }

@@ -66,11 +66,14 @@ class _WindowHostState extends State<WindowHost> {
         setState(() => _layer = null);
       }),
       layerSurface: FiloLayerSurface(
+        // Keep this in sync with filo's Config.layer_bootstrap defaults: the
+        // embedder creates this surface before Dart starts, and the controller
+        // adopts it without reconfiguring it.
         layer: FiloLayer.top,
         anchors: FiloLayerAnchors.top | FiloLayerAnchors.right,
         keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
         margin: const FiloInsets(top: 8, right: 8),
-        namespace: 'filo-demo-panel',
+        namespace: 'filo',
       ),
       size: const Size(300, 300),
     );

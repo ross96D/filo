@@ -1,5 +1,26 @@
 const std = @import("std");
 
+/// The layer surface the embedder creates for the implicit view in a
+/// layer-only app. The first layer controller must use the same properties;
+/// otherwise it reconfigures the surface and can race its first frame.
+pub const LayerBootstrap = struct {
+    /// `zwlr_layer_shell_v1.layer`: 0 background, 1 bottom, 2 top, 3 overlay.
+    layer: i32 = 2,
+    /// `zwlr_layer_surface_v1.anchor`: 1 top, 2 bottom, 4 left, 8 right.
+    anchor: u32 = 1 | 8,
+    exclusive_zone: i32 = 0,
+    /// 0 none, 1 exclusive, 2 on-demand.
+    keyboard_interactivity: i32 = 2,
+    margin_top: i32 = 8,
+    margin_right: i32 = 8,
+    margin_bottom: i32 = 0,
+    margin_left: i32 = 0,
+    width: u32 = 300,
+    height: u32 = 300,
+    namespace: [:0]const u8 = "filo",
+    accepts_input: bool = true,
+};
+
 /// Everything the embedder needs to start, passed by the host. The strings may
 /// be borrowed for the duration of `Runtime.init`; the runtime copies them.
 pub const Config = struct {
@@ -13,13 +34,13 @@ pub const Config = struct {
     vulkan_validation: bool = false,
     /// Print per-frame synchronization timings every 60 frames.
     trace: bool = false,
-    /// Open this many extra 800x600 views at startup, for testing multi-view
-    /// rendering without clicking anything.
-    extra_windows: u32 = 0,
-    /// Create the initial xdg_toplevel that backs the implicit view. Set to
-    /// false for a layer-only app (a bar or wallpaper) whose Dart entry point
-    /// renders a `ViewCollection` of layer windows instead.
-    initial_window: bool = true,
+    /// The Dart entry point renders a `ViewCollection` of layer windows only.
+    /// No implicit toplevel is bootstrapped; a layer surface defined by
+    /// [layer_bootstrap] is created for the implicit view instead.
+    layer_only: bool = false,
+    /// The layer surface created for the implicit view when [layer_only] is
+    /// true. The first controller should use the same values.
+    layer_bootstrap: LayerBootstrap = .{},
     /// Exercise the exported windowing ABI from the event loop.
     windowing_spike: bool = false,
     /// Extra engine switches, as passed by Flutter's custom-device
@@ -39,11 +60,7 @@ pub const Config = struct {
             .force_impeller = map.get("FORCE_IMPELLER") != null,
             .vulkan_validation = map.get("FILO_VULKAN_VALIDATION") != null,
             .trace = map.get("FILO_TRACE") != null,
-            .extra_windows = if (map.get("FILO_EXTRA_WINDOWS")) |value|
-                std.fmt.parseInt(u32, value, 10) catch 2
-            else
-                0,
-            .initial_window = map.get("FILO_NO_INITIAL_WINDOW") == null,
+            .layer_only = map.get("FILO_LAYER_ONLY") != null,
             .windowing_spike = map.get("FILO_WINDOWING_SPIKE") != null,
         };
     }

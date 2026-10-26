@@ -139,10 +139,23 @@ compositors report the update as an invalid argument. A compositor without
 presented with premultiplied alpha when the compositor supports it.
 
 For a layer-only app (a bar or wallpaper with no regular window), set
-`Config.initial_window = false` (`FILO_NO_INITIAL_WINDOW=1` with the development
-runner) so the embedder does not create the implicit xdg_toplevel. The Dart
-entry point then renders a `ViewCollection` containing only `FiloLayerWindow`s;
-the event loop waits for the first layer view instead of exiting on zero views.
+`Config.layer_only = true` (`FILO_LAYER_ONLY=1` with the development runner).
+The embedder then creates no implicit toplevel; before starting the engine it
+creates the layer surface described by `Config.layer_bootstrap` and adopts it as
+the implicit view (id 0). The first layer controller should use the same layer,
+anchors, margins, size, and keyboard interactivity; it then adopts that surface
+without reconfiguring it. Later layer windows create new Flutter views, as
+regular windows do. Pass `reuseImplicitView: false` to the owner (or set it on
+the controller) if the first layer must get a fresh view instead.
+
+The bootstrap defaults match the `windowing_demo` panel (top layer, anchored
+top-right, 8px top/right margin, 300×300). Hosts with a different panel should
+set `Config.layer_bootstrap` so the first controller does not have to
+reconfigure the surface.
+
+Regular apps still bootstrap the implicit view's toplevel before the engine
+starts; the first regular window adopts it. This is the engine's startup frame
+path and is intentionally kept for non-layer apps.
 
 The backend is responsible for the native archetypes: top-level windows,
 dialogs, popups, tooltips, and layer surfaces. Sizes, constraint adjustments,

@@ -198,7 +198,7 @@ void main() {
   });
 
   test(
-    'a layer window carries its layer surface and does not adopt view 0',
+    'a layer window adopts the implicit view and carries its layer surface',
     () {
       final delegate = _RegularDelegate();
       final controller = owner.createLayerWindowController(
@@ -220,12 +220,12 @@ void main() {
       );
 
       expect(controller.rootView, same(view));
-      expect(backend.lastViewId, isNot(0));
+      expect(backend.lastViewId, 0);
       expect(controller.layerSurface.layer, FiloLayer.overlay);
 
       final request = backend.requests.single;
       expect(request.kind, FiloWindowKind.layer);
-      expect(request.preferredViewId, -1);
+      expect(request.preferredViewId, 0);
       expect(request.resizable, isFalse);
       expect(request.sizedToContent, isFalse);
 
@@ -245,6 +245,23 @@ void main() {
       expect(layer.acceptsInput, isFalse);
     },
   );
+
+  test('a layer window can opt out of the implicit view', () {
+    final optOutOwner = FiloWindowingOwner(
+      backend: backend,
+      viewResolver: (_) => view,
+      reuseImplicitView: false,
+    );
+
+    optOutOwner.createLayerWindowController(
+      delegate: _RegularDelegate(),
+      layerSurface: const FiloLayerSurface(),
+      size: const Size(100, 100),
+    );
+
+    expect(backend.requests.single.preferredViewId, -1);
+    expect(backend.lastViewId, isNot(0));
+  });
 
   test('updating layer properties goes through the backend', () {
     final controller = owner.createLayerWindowController(

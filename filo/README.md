@@ -77,16 +77,25 @@ it is enough.
 | `force_impeller`    | Use Impeller instead of Skia (expected to fail with the compositor path) |
 | `vulkan_validation` | Enable the Vulkan validation layer when installed                        |
 | `trace`             | Print per-frame synchronization timings                                  |
-| `extra_windows`     | Open this many extra test views at startup                               |
-| `initial_window`    | Create the implicit xdg_toplevel; false for a layer-only app             |
+| `layer_only`        | No implicit toplevel; bootstrap the implicit view's layer surface         |
+| `layer_bootstrap`   | Layer/anchors/margins/size/namespace for that surface (see below)        |
 | `windowing_spike`   | Exercise the exported windowing ABI from the event loop                  |
 | `engine_args`       | Extra engine switches, e.g. Flutter's `${engineOptions}`                 |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
-`FORCE_IMPELLER`, `FILO_VULKAN_VALIDATION`, `FILO_TRACE`,
-`FILO_EXTRA_WINDOWS`, `FILO_NO_INITIAL_WINDOW` and `FILO_WINDOWING_SPIKE`. A
-host with its own configuration can build a `Config` directly.
+`FORCE_IMPELLER`, `FILO_VULKAN_VALIDATION`, `FILO_TRACE`, `FILO_LAYER_ONLY` and
+`FILO_WINDOWING_SPIKE`. A host with its own configuration can build a `Config`
+directly.
+
+For a layer-only app (`layer_only = true`, `FILO_LAYER_ONLY=1`), the embedder
+creates a layer surface for the implicit view before starting the engine. The
+defaults in `LayerBootstrap` match the `windowing_demo` panel: top layer,
+anchored top-right, 8px top/right margin, 300×300, on-demand keyboard. The first
+`FiloLayerWindowController` should use the same properties; it then adopts that
+surface without reconfiguring it. A controller with different properties updates
+the surface, which can race its first frame, so hosts with a different panel
+should set `Config.layer_bootstrap` accordingly.
 
 The runtime copies the config strings, so the caller's buffers only need to
 live until `Runtime.init` returns. `engine_args` is the exception: the runtime

@@ -243,6 +243,9 @@ class FiloRegularWindowController extends RegularWindowController
 /// the compositor's window switcher.
 ///
 /// It still owns an ordinary Flutter view and renders like any other window.
+/// By default the first layer window adopts the implicit view (id 0), just like
+/// the first regular window; set `reuseImplicitView` to false to force a new
+/// Flutter view.
 class FiloLayerWindowController extends RegularWindowController
     with FiloWindowControllerMixin {
   FiloLayerWindowController({
@@ -253,6 +256,7 @@ class FiloLayerWindowController extends RegularWindowController
     Size? size,
     BoxConstraints? constraints,
     bool? sizedToContent,
+    bool reuseImplicitView = true,
   }) : _delegate = delegate,
        _layerSurface = layerSurface,
        super.empty() {
@@ -264,7 +268,7 @@ class FiloLayerWindowController extends RegularWindowController
         resizable: false,
         sizedToContent: sizedToContent ?? size == null,
         decorated: false,
-        preferredViewId: -1,
+        preferredViewId: reuseImplicitView ? 0 : -1,
         layer: layerSurface,
       ),
     );

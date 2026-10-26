@@ -184,8 +184,8 @@ pub const WindowCallbacks = extern struct {
     on_destroy: ?NotifyFn,
 
     /// Whether no observer has been registered. Views created by the embedder
-    /// itself (the implicit view, `FILO_EXTRA_WINDOWS`) have no callbacks;
-    /// every view a Dart controller created has all of them.
+    /// itself (the implicit view) have no callbacks; every view a Dart
+    /// controller created has all of them.
     pub fn isEmpty(self: WindowCallbacks) bool {
         return self.on_configure == null and
             self.on_state == null and

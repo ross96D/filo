@@ -172,12 +172,9 @@ pub const App = struct {
     /// event loop, to prove `AddView` completes synchronously on this thread.
     windowing_spike: bool = false,
     windowing_spike_done: bool = false,
-    /// A layer-only app starts with no views. Keep the loop alive until the
-    /// framework creates its first one instead of treating zero views as
-    /// "everything closed".
-    allow_empty_views: bool = false,
-    /// Whether any view has ever been registered. Once it has, zero views means
-    /// the app is done.
+    /// Whether any view has ever been registered. The loop stays alive with
+    /// zero views until the first window is created; after that, zero views
+    /// means the app is done.
     saw_view: bool = false,
     /// The loop sources are only registered once, by `runLoop`.
     loop_sources_added: bool = false,
@@ -255,44 +252,42 @@ pub const App = struct {
     /// Create a toplevel from a windowing request and apply its properties.
     fn createToplevel(self: *App, req: *windowing.WindowRequest) !*View {
         const sized_to_content = req.sized_to_content != 0;
-        // The first regular window may adopt the implicit view (id 0), which
-        // `main` already created and added.
+        // The first regular window adopts the implicit view. If the embedder
+        // did not bootstrap a toplevel (or the implicit surface has another
+        // role), create one lazily and never AddView it.
         if (req.preferred_view_id == 0 and !self.implicit_adopted) {
             if (self.viewForId(0)) |view| {
-                self.implicit_adopted = true;
-                view.win.applyRequest(req);
-                if (req.title) |title| {
-                    view.win.setTitle(title);
-                    view.setViewTitleZ(req.title);
+                // A layer-role surface cannot become an xdg_toplevel. Leave it
+                // for a layer request and create a new view instead.
+                if (!view.win.isLayer()) {
+                    return self.adoptToplevelView(view, req);
                 }
-                if (req.resizable == 0) {
-                    const fixed = if (req.size.width > 0 and req.size.height > 0)
-                        windowing.Size{ .width = req.size.width, .height = req.size.height }
-                    else
-                        windowing.Size{ .width = view.win.width, .height = view.win.height };
-                    view.win.setMinSize(fixed);
-                    view.win.setMaxSize(fixed);
-                } else {
-                    view.win.setMinSize(req.min_size);
-                    view.win.setMaxSize(req.max_size);
-                }
-                view.win.commit();
+            } else {
+                const initial_width = @max(1, @min(req.min_size.width, max_content_size));
+                const initial_height = @max(1, @min(req.min_size.height, max_content_size));
+                const width: u32 = if (req.size.width > 0)
+                    @min(req.size.width, max_content_size)
+                else if (sized_to_content)
+                    initial_width
+                else
+                    800;
+                const height: u32 = if (req.size.height > 0)
+                    @min(req.size.height, max_content_size)
+                else if (sized_to_content)
+                    initial_height
+                else
+                    600;
 
-                if (req.sized_to_content != 0) {
-                    self.ctx.eng.sendWindowMetricsForView(
-                        view.id,
-                        view.win.physicalWidth(),
-                        view.win.physicalHeight(),
-                        view.win.pixel_ratio,
-                        view.win.metricsConstraints(),
-                    );
-                    self.ctx.eng.scheduleFrame();
-                }
+                const win = try self.ctx.conn.createWindow();
+                var owned = true;
+                errdefer if (owned) win.destroy(self.ctx.allocator);
+                if (width > 0) win.width = width;
+                if (height > 0) win.height = height;
+                try self.ctx.conn.waitReady(win);
 
-                view.win.resized = false;
-                view.win.state_dirty = false;
-                view.win.capabilities_dirty = false;
-                return view;
+                const view = try self.adoptView(0, win);
+                owned = false;
+                return self.adoptToplevelView(view, req);
             }
         }
 
@@ -351,6 +346,54 @@ pub const App = struct {
         return view;
     }
 
+    /// Finish adopting the implicit view as a toplevel. The view already exists
+    /// in the engine, so it must never go through `AddView`.
+    fn adoptToplevelView(self: *App, view: *View, req: *const windowing.WindowRequest) !*View {
+        self.implicit_adopted = true;
+        view.added = true;
+
+        view.win.applyRequest(req);
+        // Send the first metrics before any extra toplevel requests. The view
+        // already has the compositor's configured size; a title/constraint
+        // commit here can otherwise race the first frame.
+        self.notifyAdoptedView(view);
+
+        if (req.title) |title| {
+            view.win.setTitle(title);
+            view.setViewTitleZ(req.title);
+        }
+        if (req.resizable == 0) {
+            const fixed = if (req.size.width > 0 and req.size.height > 0)
+                windowing.Size{ .width = req.size.width, .height = req.size.height }
+            else
+                windowing.Size{ .width = view.win.width, .height = view.win.height };
+            view.win.setMinSize(fixed);
+            view.win.setMaxSize(fixed);
+        } else {
+            view.win.setMinSize(req.min_size);
+            view.win.setMaxSize(req.max_size);
+        }
+        view.win.commit();
+
+        view.win.resized = false;
+        view.win.state_dirty = false;
+        view.win.capabilities_dirty = false;
+        return view;
+    }
+
+    /// Send the initial metrics for a view that was adopted instead of added.
+    /// `AddView` normally carries these; the implicit view never gets one.
+    ///
+    /// This is queued rather than sent inline: the controller creates windows
+    /// from inside a Dart callback, and `FlutterEngineSendWindowMetricsEvent`
+    /// flushes the UI task runner. Re-entering it from there can wedge the
+    /// engine's frame scheduling.
+    fn notifyAdoptedView(self: *App, view: *View) void {
+        const req = std.heap.c_allocator.create(AdoptViewRequest) catch return;
+        req.* = .{ .app = self, .view = view };
+        self.ctx.eng.postMainTask(runAdoptViewMetrics, req);
+    }
+
     /// Create a popup from a windowing request and apply its initial position.
     fn createPopup(self: *App, req: *const windowing.WindowRequest) !*View {
         if (req.parent_view_id < 0) return error.InvalidParent;
@@ -406,46 +449,37 @@ pub const App = struct {
 
     /// Create a wlr-layer-shell surface from a windowing request.
     fn createLayer(self: *App, req: *const windowing.WindowRequest) !*View {
-        const state = req.layer_surface;
-        const output = if (state.output < 0)
-            null
-        else blk: {
-            const index: usize = @intCast(state.output);
-            const outputs = self.ctx.conn.outputs.items;
-            if (index >= outputs.len) return error.UnknownOutput;
-            break :blk outputs[index];
-        };
+        // The first layer window adopts the implicit view. A layer-only
+        // embedder bootstraps this surface at startup; if it is missing, create
+        // it lazily with the exact requested properties and never AddView it.
+        if (req.preferred_view_id == 0 and !self.implicit_adopted) {
+            if (self.viewForId(0)) |view| {
+                // Re-adopt after a hot restart. A toplevel cannot become a
+                // layer surface, so a role mismatch falls through to a new view.
+                if (view.win.isLayer()) {
+                    return self.readoptLayerView(view, req);
+                }
+            } else {
+                const win = try self.createLayerWindow(req);
+                var owned = true;
+                errdefer if (owned) win.destroy(self.ctx.allocator);
 
-        const anchors = state.anchor;
-        const horizontal = anchors & windowing.LayerAnchor.left != 0 and
-            anchors & windowing.LayerAnchor.right != 0;
-        const vertical = anchors & windowing.LayerAnchor.top != 0 and
-            anchors & windowing.LayerAnchor.bottom != 0;
-        const sized_to_content = req.sized_to_content != 0;
+                win.applyRequest(req);
+                try self.ctx.conn.waitReady(win);
+                if (win.width == 0) win.width = 800;
+                if (win.height == 0) win.height = 600;
 
-        const width = layerDimension(
-            req.size.width,
-            horizontal,
-            sized_to_content,
-            @max(1, @min(req.min_size.width, max_content_size)),
-            800,
-        );
-        const height = layerDimension(
-            req.size.height,
-            vertical,
-            sized_to_content,
-            @max(1, @min(req.min_size.height, max_content_size)),
-            600,
-        );
+                const view = try self.adoptView(0, win);
+                owned = false;
+                self.implicit_adopted = true;
+                view.added = true;
+                self.notifyAdoptedView(view);
+                view.win.resized = false;
+                return view;
+            }
+        }
 
-        const id = self.reserveViewId();
-        const win = try self.ctx.conn.createLayer(.{
-            .state = state,
-            .output = output,
-            .namespace = if (state.namespace) |namespace| namespace else "filo",
-            .width = width,
-            .height = height,
-        });
+        const win = try self.createLayerWindow(req);
         var owned = true;
         errdefer if (owned) win.destroy(self.ctx.allocator);
 
@@ -457,11 +491,74 @@ pub const App = struct {
         if (win.width == 0) win.width = 800;
         if (win.height == 0) win.height = 600;
 
-        const view = try self.adoptView(id, win);
+        const view = try self.adoptView(self.reserveViewId(), win);
         owned = false;
 
         // The initial state is returned in the handle; do not replay it as
         // events once the caller registers its callbacks.
+        view.win.resized = false;
+        return view;
+    }
+
+    /// Create a native layer surface from the request's state, size and
+    /// namespace. The caller owns the returned window until it is adopted.
+    fn createLayerWindow(self: *App, req: *const windowing.WindowRequest) !*window.Window {
+        const state = req.layer_surface;
+        const output = if (state.output < 0)
+            null
+        else blk: {
+            const index: usize = @intCast(state.output);
+            const outputs = self.ctx.conn.outputs.items;
+            if (index >= outputs.len) return error.UnknownOutput;
+            break :blk outputs[index];
+        };
+
+        const size = layerRequestSize(req);
+        return self.ctx.conn.createLayer(.{
+            .state = state,
+            .output = output,
+            .namespace = if (state.namespace) |namespace| namespace else "filo",
+            .width = size.width,
+            .height = size.height,
+        });
+    }
+
+    /// Update the implicit view's already-created layer surface to a new
+    /// request. Used on hot restart, when view 0 survives the isolate.
+    fn readoptLayerView(self: *App, view: *View, req: *const windowing.WindowRequest) !*View {
+        self.implicit_adopted = true;
+        view.added = true;
+
+        const state = req.layer_surface;
+        const size = layerRequestSize(req);
+        const current = view.win.layer_state;
+
+        // The startup surface may already match this request exactly. Keep it
+        // as-is: reconfiguring a layer surface that was adopted before the
+        // engine started races the first frame.
+        const same_surface = current.layer == state.layer and
+            current.anchor == state.anchor and
+            current.exclusive_zone == state.exclusive_zone and
+            current.keyboard_interactivity == state.keyboard_interactivity and
+            current.margin_top == state.margin_top and
+            current.margin_right == state.margin_right and
+            current.margin_bottom == state.margin_bottom and
+            current.margin_left == state.margin_left and
+            current.accepts_input == state.accepts_input and
+            view.win.width == size.width and
+            view.win.height == size.height;
+
+        if (!same_surface) {
+            view.win.applyRequest(req);
+            // Apply the size first so the layer-state validation sees the new
+            // dimensions, then the state. Both are double-buffered and commit.
+            view.win.configured = false;
+            view.win.setSize(size);
+            try view.win.applyLayerSurface(state);
+            try self.ctx.conn.waitReady(view.win);
+        }
+
+        self.notifyAdoptedView(view);
         view.win.resized = false;
         return view;
     }
@@ -551,9 +648,8 @@ pub const App = struct {
         var orphaned: usize = 0;
         for (self.views.items) |view| {
             // Views without an observer were created by the embedder itself
-            // (the implicit view or `FILO_EXTRA_WINDOWS`), not by the old
-            // isolate, so there is no stale callback to drop and nothing to
-            // close.
+            // (the implicit view), not by the old isolate, so there is no
+            // stale callback to drop and nothing to close.
             const dart_owned = !view.callbacks.isEmpty();
             view.callbacks = windowing.empty_callbacks;
             if (view.id == 0) {
@@ -1036,6 +1132,33 @@ fn layerDimension(
     if (opposite_anchors) return 0;
     if (sized_to_content) return @max(1, minimum);
     return fallback;
+}
+
+/// The size to request for a layer surface, following its anchors.
+fn layerRequestSize(req: *const windowing.WindowRequest) windowing.Size {
+    const state = req.layer_surface;
+    const anchors = state.anchor;
+    const horizontal = anchors & windowing.LayerAnchor.left != 0 and
+        anchors & windowing.LayerAnchor.right != 0;
+    const vertical = anchors & windowing.LayerAnchor.top != 0 and
+        anchors & windowing.LayerAnchor.bottom != 0;
+    const sized_to_content = req.sized_to_content != 0;
+    return .{
+        .width = layerDimension(
+            req.size.width,
+            horizontal,
+            sized_to_content,
+            @max(1, @min(req.min_size.width, max_content_size)),
+            800,
+        ),
+        .height = layerDimension(
+            req.size.height,
+            vertical,
+            sized_to_content,
+            @max(1, @min(req.min_size.height, max_content_size)),
+            600,
+        ),
+    };
 }
 
 fn anchorFromInt(value: i32) xdg.Positioner.Anchor {
@@ -1612,6 +1735,29 @@ pub fn viewFocusChangeRequestCallback(
     });
 }
 
+const AdoptViewRequest = struct {
+    app: *App,
+    view: *View,
+};
+
+/// Publish the first metrics for a view the first controller adopted as the
+/// implicit view. Runs from the main task queue, outside any Dart callback.
+fn runAdoptViewMetrics(user_data: ?*anyopaque) void {
+    const req: *AdoptViewRequest = @ptrCast(@alignCast(user_data.?));
+    defer std.heap.c_allocator.destroy(req);
+
+    const app = req.app;
+    const view = req.view;
+    app.ctx.eng.sendWindowMetricsForView(
+        view.id,
+        view.win.physicalWidth(),
+        view.win.physicalHeight(),
+        view.win.pixel_ratio,
+        view.win.metricsConstraints(),
+    );
+    app.ctx.eng.scheduleFrame();
+}
+
 const CreateWindowRequest = struct {
     app: *App,
     width: u32,
@@ -1700,14 +1846,11 @@ fn onPlatformWake(loop: *ev.Loop, completion: *ev.Completion) void {
 /// requests, a tick the engine is waiting on, and the requests those queued on
 /// the connection.
 fn afterDispatch(self: *App, loop: *ev.Loop) void {
-    if (self.views.items.len == 0) {
-        // A layer-only app starts with no implicit view; wait for the
-        // framework to create its first layer window. After any view has
-        // existed, zero views still means the app is done.
-        if (!self.allow_empty_views or self.saw_view) {
-            loop.stop();
-            return;
-        }
+    if (self.views.items.len == 0 and self.saw_view) {
+        // A process with no window yet stays alive until Dart creates one;
+        // once a view has existed, zero views means the app is done.
+        loop.stop();
+        return;
     }
 
     if (self.windowing_spike and !self.windowing_spike_done) {

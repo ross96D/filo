@@ -93,13 +93,16 @@ class FiloWindowingOwner implements WindowingOwner {
   /// `WindowingOwner` interface: layer surfaces are a Filo extension.
   ///
   /// The controller is a [RegularWindowController] subtype so it can be passed
-  /// to [FiloLayerWindow]. It does not adopt the implicit view.
+  /// to [FiloLayerWindow]. When [reuseImplicitView] is true it adopts the
+  /// implicit view (id 0), like the first regular window does. A layer-only
+  /// embedder bootstraps that view's layer surface before startup.
   FiloLayerWindowController createLayerWindowController({
     required RegularWindowControllerDelegate delegate,
     required FiloLayerSurface layerSurface,
     Size? size,
     BoxConstraints? constraints,
     bool? sizedToContent,
+    bool? reuseImplicitView,
   }) {
     _ensureEnabled();
     return FiloLayerWindowController(
@@ -110,6 +113,7 @@ class FiloWindowingOwner implements WindowingOwner {
       size: size,
       constraints: constraints,
       sizedToContent: sizedToContent,
+      reuseImplicitView: reuseImplicitView ?? this.reuseImplicitView,
     );
   }
 
