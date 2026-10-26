@@ -774,7 +774,7 @@ pub const App = struct {
                 if (layer.type != @as(c.FlutterLayerContentType, @intCast(c.kFlutterLayerContentTypeBackingStore))) continue;
                 const backing_store = layer.unnamed_0.backing_store;
                 if (backing_store == null or backing_store.*.user_data == null) continue;
-    
+
                 const holder: *VulkanBackingStore = @ptrCast(@alignCast(backing_store.*.user_data.?));
                 width = @max(width, holder.store.extent.width);
                 height = @max(height, holder.store.extent.height);

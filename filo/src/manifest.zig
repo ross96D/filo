@@ -22,8 +22,9 @@ pub const LayerBootstrap = struct {
     accepts_input: bool = true,
 };
 
-/// Everything the embedder needs to start, passed by the host. The strings may
-/// be borrowed for the duration of `Runtime.init`; the runtime copies them.
+/// Everything the embedder needs to start, passed by the host. Path strings are
+/// copied by `Runtime.init`; `engine_args` and `dart_entrypoint_args` are only
+/// read during it.
 pub const Config = struct {
     engine_lib: []const u8,
     icu_data: []const u8,
@@ -44,10 +45,14 @@ pub const Config = struct {
     bootstrap_layer_surface: LayerBootstrap = .{},
     /// Exercise the exported windowing ABI from the event loop.
     windowing_spike: bool = false,
-    /// Extra engine switches, as passed by Flutter's custom-device
-    /// `runDebug` `${engineOptions}`. The strings are borrowed until
+    /// Extra engine switches supplied by the host. Flutter's custom-device
+    /// `${engineOptions}` are not forwarded yet. The strings are borrowed until
     /// `Runtime.init` returns; the runtime does not keep them.
     engine_args: []const []const u8 = &.{},
+    /// Arguments passed to the Dart entrypoint, as `main(List<String> args)`.
+    /// The strings are borrowed until `Runtime.init` returns; the engine copies
+    /// them while initializing.
+    dart_entrypoint_args: []const []const u8 = &.{},
 
     /// Read the `FILO_*` environment variables. This keeps the development
     /// runner working; a host that has its own configuration should construct

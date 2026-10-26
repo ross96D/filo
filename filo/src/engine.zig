@@ -281,10 +281,9 @@ pub const Engine = struct {
         args.compositor = compositor;
 
         // The engine's command line. Impeller is opt-in: without
-        // `--enable-impeller` the engine renders with Skia. The host adds the
-        // switches Flutter passes to a custom device's `runDebug`, such as
-        // `--enable-checked-mode=true`, `--vm-service-port=...` and
-        // `--route=...`.
+        // `--enable-impeller` the engine renders with Skia. `engine_args` are
+        // host-supplied switches; Flutter's custom-device `${engineOptions}`
+        // are not forwarded yet.
         var argv_arena = std.heap.ArenaAllocator.init(allocator);
         defer argv_arena.deinit();
         const argv_allocator = argv_arena.allocator();
@@ -298,6 +297,20 @@ pub const Engine = struct {
         }
         args.command_line_argc = @intCast(engine_argv.items.len);
         args.command_line_argv = @ptrCast(engine_argv.items.ptr);
+
+        // Dart entrypoint arguments are separate from the engine's own command
+        // line. The engine hands them to `main(List<String> args)` and copies
+        // the strings while initializing, so the arena only has to outlive this
+        // call.
+        var dart_argv: std.ArrayListUnmanaged([*:0]const u8) = .empty;
+        for (cfg.dart_entrypoint_args) |arg| {
+            const arg_z = try argv_allocator.dupeSentinel(u8, arg, 0);
+            try dart_argv.append(argv_allocator, arg_z.ptr);
+        }
+        if (dart_argv.items.len > 0) {
+            args.dart_entrypoint_argc = @intCast(dart_argv.items.len);
+            args.dart_entrypoint_argv = @ptrCast(dart_argv.items.ptr);
+        }
 
         if (self.procs.Initialize.?(@intCast(c.FLUTTER_ENGINE_VERSION), renderer, &args, user_data, &self.handle) != 0)
             return error.EngineInitializeFailed;

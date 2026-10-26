@@ -80,13 +80,32 @@ it is enough.
 | `bootstrap_layer`   | Bootstrap implicit view 0 as a layer instead of an xdg_toplevel          |
 | `bootstrap_layer_surface` | Layer/anchors/margins/size/namespace for that surface (see below) |
 | `windowing_spike`   | Exercise the exported windowing ABI from the event loop                  |
-| `engine_args`       | Extra engine switches, e.g. Flutter's `${engineOptions}`                 |
+| `engine_args`       | Extra engine switches supplied by the host                               |
+| `dart_entrypoint_args` | Arguments for Dart's `main(List<String> args)`                       |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
 `FORCE_IMPELLER`, `FILO_VULKAN_VALIDATION`, `FILO_TRACE`, `FILO_LAYER_ONLY` and
 `FILO_WINDOWING_SPIKE`. A host with its own configuration can build a `Config`
 directly.
+
+`engine_args` is a host-facing field. The switches Flutter passes to a custom
+device in `${engineOptions}` are currently ignored.
+
+Command-line arguments are the Dart entrypoint arguments and arrive as
+`main(List<String> args)`, flags included:
+
+```sh
+./zig-out/bin/app --dart-flag1 --dart-flag2=value positional
+```
+
+For `flutter run` through a custom device, use `FILO_DART_ENTRYPOINT_ARGS`
+instead, with one argument per line. Flutter's custom-device API does not
+forward `--dart-entrypoint-args`:
+
+```sh
+FILO_DART_ENTRYPOINT_ARGS=$'--dart-flag1\npositional' flutter run -d filo_wayland
+```
 
 `bootstrap_layer` chooses the role of the implicit view (id 0) before the engine
 starts: a layer surface instead of an xdg_toplevel. It is not a restriction on
@@ -103,9 +122,9 @@ should set `Config.bootstrap_layer_surface` accordingly. `FILO_LAYER_ONLY=1` is
 the development-runner switch that sets `bootstrap_layer`.
 
 The runtime copies the config strings, so the caller's buffers only need to
-live until `Runtime.init` returns. `engine_args` is the exception: the runtime
-only reads it during `Runtime.init`, so the backing strings need to live until
-then, not for the runtime's lifetime.
+live until `Runtime.init` returns. `engine_args` and `dart_entrypoint_args` are
+the exception: the runtime only reads them during `Runtime.init`, so the backing
+strings need to live until then, not for the runtime's lifetime.
 
 ## Lifecycle
 
@@ -146,6 +165,10 @@ repository is `demos/multiple_windows/wayland/`. The template contains:
 Copy it into an app as `wayland/`, fetch filo into it, provide an engine path in
 `.env.local`, and register the device once with `wayland/register-device.sh`.
 The same global device entry works for every app that has a `wayland/` folder.
+
+Flutter custom devices do not forward `--dart-entrypoint-args`; use
+`FILO_DART_ENTRYPOINT_ARGS` with one argument per line instead. Engine switches
+from `${engineOptions}` are currently ignored.
 
 Flutter custom devices only support debug builds. Release builds still need a
 separate AOT bundle and a manual launch with `FILO_AOT_LIB` set.

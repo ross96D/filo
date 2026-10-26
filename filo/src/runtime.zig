@@ -100,6 +100,7 @@ pub const Runtime = struct {
             .bootstrap_layer = config.bootstrap_layer,
             .windowing_spike = config.windowing_spike,
             .engine_args = config.engine_args,
+            .dart_entrypoint_args = config.dart_entrypoint_args,
         };
 
         const conn = try connection.Connection.connect(allocator);
