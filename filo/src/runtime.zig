@@ -96,7 +96,7 @@ pub const Runtime = struct {
             .force_impeller = config.force_impeller,
             .vulkan_validation = config.vulkan_validation,
             .trace = config.trace,
-            .layer_only = config.layer_only,
+            .bootstrap_layer = config.bootstrap_layer,
             .windowing_spike = config.windowing_spike,
             .engine_args = config.engine_args,
         };
@@ -104,13 +104,13 @@ pub const Runtime = struct {
         const conn = try connection.Connection.connect(allocator);
         self.conn = conn;
 
-        if (config.layer_only) {
+        if (config.bootstrap_layer) {
             // Bootstrap the implicit view with the configured layer surface.
             // The first layer controller adopts it; the surface exists before
             // the engine, so its first frame follows the same startup path as
             // a regular window.
             var state = std.mem.zeroes(windowing.LayerSurface);
-            const boot = config.layer_bootstrap;
+            const boot = config.bootstrap_layer_surface;
             state.layer = boot.layer;
             state.anchor = boot.anchor;
             state.exclusive_zone = boot.exclusive_zone;

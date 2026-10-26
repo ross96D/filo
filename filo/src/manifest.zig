@@ -1,8 +1,9 @@
 const std = @import("std");
 
-/// The layer surface the embedder creates for the implicit view in a
-/// layer-only app. The first layer controller must use the same properties;
-/// otherwise it reconfigures the surface and can race its first frame.
+/// The layer surface the embedder creates for the implicit view when
+/// `bootstrap_layer` is true. The first layer controller should use the same
+/// properties; otherwise it reconfigures the surface and can race its first
+/// frame.
 pub const LayerBootstrap = struct {
     /// `zwlr_layer_shell_v1.layer`: 0 background, 1 bottom, 2 top, 3 overlay.
     layer: i32 = 2,
@@ -34,13 +35,13 @@ pub const Config = struct {
     vulkan_validation: bool = false,
     /// Print per-frame synchronization timings every 60 frames.
     trace: bool = false,
-    /// The Dart entry point renders a `ViewCollection` of layer windows only.
-    /// No implicit toplevel is bootstrapped; a layer surface defined by
-    /// [layer_bootstrap] is created for the implicit view instead.
-    layer_only: bool = false,
-    /// The layer surface created for the implicit view when [layer_only] is
-    /// true. The first controller should use the same values.
-    layer_bootstrap: LayerBootstrap = .{},
+    /// Bootstrap the implicit view (id 0) as a layer surface instead of an
+    /// xdg_toplevel. This only chooses view 0's role; it does not restrict the
+    /// windows the app may create.
+    bootstrap_layer: bool = false,
+    /// The layer surface created for the implicit view when [bootstrap_layer]
+    /// is true. The first layer controller should use the same values.
+    bootstrap_layer_surface: LayerBootstrap = .{},
     /// Exercise the exported windowing ABI from the event loop.
     windowing_spike: bool = false,
     /// Extra engine switches, as passed by Flutter's custom-device
@@ -60,7 +61,9 @@ pub const Config = struct {
             .force_impeller = map.get("FORCE_IMPELLER") != null,
             .vulkan_validation = map.get("FILO_VULKAN_VALIDATION") != null,
             .trace = map.get("FILO_TRACE") != null,
-            .layer_only = map.get("FILO_LAYER_ONLY") != null,
+            // Development-runner switch for the layer-only demo. Hosts should
+            // construct Config directly when they need this.
+            .bootstrap_layer = map.get("FILO_LAYER_ONLY") != null,
             .windowing_spike = map.get("FILO_WINDOWING_SPIKE") != null,
         };
     }

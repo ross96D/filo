@@ -77,8 +77,8 @@ it is enough.
 | `force_impeller`    | Use Impeller instead of Skia (expected to fail with the compositor path) |
 | `vulkan_validation` | Enable the Vulkan validation layer when installed                        |
 | `trace`             | Print per-frame synchronization timings                                  |
-| `layer_only`        | No implicit toplevel; bootstrap the implicit view's layer surface         |
-| `layer_bootstrap`   | Layer/anchors/margins/size/namespace for that surface (see below)        |
+| `bootstrap_layer`   | Bootstrap implicit view 0 as a layer instead of an xdg_toplevel          |
+| `bootstrap_layer_surface` | Layer/anchors/margins/size/namespace for that surface (see below) |
 | `windowing_spike`   | Exercise the exported windowing ABI from the event loop                  |
 | `engine_args`       | Extra engine switches, e.g. Flutter's `${engineOptions}`                 |
 
@@ -88,14 +88,19 @@ it is enough.
 `FILO_WINDOWING_SPIKE`. A host with its own configuration can build a `Config`
 directly.
 
-For a layer-only app (`layer_only = true`, `FILO_LAYER_ONLY=1`), the embedder
-creates a layer surface for the implicit view before starting the engine. The
-defaults in `LayerBootstrap` match the `windowing_demo` panel: top layer,
+`bootstrap_layer` chooses the role of the implicit view (id 0) before the engine
+starts: a layer surface instead of an xdg_toplevel. It is not a restriction on
+the windows the app may create. Choose it to match the app's first window; the
+current engine integration reliably presents that bootstrap view. The setting
+exists because the engine needs view 0's native surface before its first frame.
+
+The defaults in `LayerBootstrap` match the `windowing_demo` panel: top layer,
 anchored top-right, 8px top/right margin, 300×300, on-demand keyboard. The first
 `FiloLayerWindowController` should use the same properties; it then adopts that
 surface without reconfiguring it. A controller with different properties updates
 the surface, which can race its first frame, so hosts with a different panel
-should set `Config.layer_bootstrap` accordingly.
+should set `Config.bootstrap_layer_surface` accordingly. `FILO_LAYER_ONLY=1` is
+the development-runner switch that sets `bootstrap_layer`.
 
 The runtime copies the config strings, so the caller's buffers only need to
 live until `Runtime.init` returns. `engine_args` is the exception: the runtime
