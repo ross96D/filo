@@ -133,9 +133,7 @@ pub const View = struct {
             .toplevel => |*toplevel| {
                 if (toplevel.state_dirty) {
                     toplevel.state_dirty = false;
-                    if (self.callbacks) |callbacks| {
-                        if (callbacks.on_state) |on_state| on_state(toplevel.toplevelState());
-                    }
+                    if (self.callbacks.on_state) |on_state| on_state(toplevel.toplevelState());
                 }
                 if (toplevel.capabilities_dirty) {
                     toplevel.capabilities_dirty = false;
@@ -1433,9 +1431,7 @@ fn runViewOp(user_data: ?*anyopaque) void {
         },
         .remove => if (op.ok) {
             std.debug.print("filo: view {} removed\n", .{view.id});
-            if (view.callbacks) |callbacks| {
-                if (callbacks.on_destroy) |on_destroy| on_destroy();
-            }
+            if (view.callbacks.on_destroy) |on_destroy| on_destroy();
             app.destroyView(view);
         } else {
             std.debug.print("filo: view {} could not be removed\n", .{view.id});

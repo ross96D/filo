@@ -31,45 +31,31 @@ var instance_active = std.atomic.Value(bool).init(false);
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
 
-    /// The caller's config with every string copied into storage owned here.
-    /// Components that keep the config (or parts of it) outlive the caller's
-    /// buffers.
-    config: manifest.Config = undefined,
-    engine_lib: ?[:0]u8 = null,
-    icu_data: ?[:0]u8 = null,
-    assets: ?[:0]u8 = null,
+    /// The caller's config strings, copied into storage owned here.
+    engine_lib: [:0]u8 = undefined,
+    icu_data: [:0]u8 = undefined,
+    assets: [:0]u8 = undefined,
     aot_lib: ?[:0]u8 = null,
 
     loop: ev.Loop = undefined,
-    loop_ready: bool = false,
-    conn: ?*connection.Connection = null,
-    /// The bootstrap toplevel, until the first window controller adopts view 0.
-    first_win: ?*window.Window = null,
     vk: vulkan.Context = undefined,
-    vk_ready: bool = false,
 
     app: app_mod.App = undefined,
-    app_ready: bool = false,
-    windowing_installed: bool = false,
-    eng: ?*engine.Engine = null,
 
     ti: text_input.TextInput = undefined,
-    ti_ready: bool = false,
     inp: input.Input = undefined,
-    inp_ready: bool = false,
     ph: platform_handler.PlatformHandler = undefined,
-    ph_ready: bool = false,
     wm: window_manager.WindowManager = undefined,
     mc: mouse_cursor.MouseCursor = undefined,
 
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ran: bool = false,
 
-    /// Build the whole embedder: connection, loop, Vulkan, engine and handlers.
-    /// No window is created here; the first windowing request creates the
-    /// implicit view's native surface. Every failure unwinds through `deinit`.
+    /// Build the whole embedder: config copies, connection, loop, Vulkan,
+    /// engine and handlers. The bootstrap window is created before the engine;
+    /// the first windowing request adopts it as the implicit view. Every failure
+    /// here unwinds locally, so `deinit` only ever sees a fully built runtime.
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -78,21 +64,36 @@ pub const Runtime = struct {
         if (instance_active.swap(true, .acq_rel)) return error.AlreadyInitialized;
         errdefer instance_active.store(false, .release);
 
-        const self = try allocator.create(Runtime);
-        errdefer self.deinit();
-        self.* = .{ .allocator = allocator, .io = io };
+        // Copy the config paths before callers can free their buffers. The
+        // engine consumes them during init; the copies stay owned by the
+        // runtime.
+        const engine_lib = try allocator.dupeSentinel(u8, config.engine_lib, 0);
+        errdefer allocator.free(engine_lib);
+        const icu_data = try allocator.dupeSentinel(u8, config.icu_data, 0);
+        errdefer allocator.free(icu_data);
+        const assets = try allocator.dupeSentinel(u8, config.assets, 0);
+        errdefer allocator.free(assets);
+        const aot_lib: ?[:0]u8 = if (config.aot_lib) |aot|
+            try allocator.dupeSentinel(u8, aot, 0)
+        else
+            null;
+        errdefer if (aot_lib) |aot| allocator.free(aot);
 
-        // Copy the config so callers may keep using their own buffers after
-        // `init` returns.
-        self.engine_lib = try allocator.dupeSentinel(u8, config.engine_lib, 0);
-        self.icu_data = try allocator.dupeSentinel(u8, config.icu_data, 0);
-        self.assets = try allocator.dupeSentinel(u8, config.assets, 0);
-        if (config.aot_lib) |aot| self.aot_lib = try allocator.dupeSentinel(u8, aot, 0);
-        self.config = .{
-            .engine_lib = self.engine_lib.?,
-            .icu_data = self.icu_data.?,
-            .assets = self.assets.?,
-            .aot_lib = if (self.aot_lib) |aot| aot else null,
+        const self = try allocator.create(Runtime);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .engine_lib = engine_lib,
+            .icu_data = icu_data,
+            .assets = assets,
+            .aot_lib = aot_lib,
+        };
+
+        const engine_config = manifest.Config{
+            .engine_lib = engine_lib,
+            .icu_data = icu_data,
+            .assets = assets,
+            .aot_lib = aot_lib,
             .force_impeller = config.force_impeller,
             .vulkan_validation = config.vulkan_validation,
             .trace = config.trace,
@@ -102,13 +103,14 @@ pub const Runtime = struct {
         };
 
         const conn = try connection.Connection.connect(allocator);
-        self.conn = conn;
+        errdefer conn.deinit();
 
-        if (config.bootstrap_layer) {
+        // The bootstrap window must exist before the engine so its first frame
+        // follows the same startup path as a regular window. It stays local:
+        // once adopted it is owned by the implicit view.
+        var boot_win: ?*window.Window = if (config.bootstrap_layer) blk: {
             // Bootstrap the implicit view with the configured layer surface.
-            // The first layer controller adopts it; the surface exists before
-            // the engine, so its first frame follows the same startup path as
-            // a regular window.
+            // The first layer controller adopts it.
             var state = std.mem.zeroes(windowing.LayerSurface);
             const boot = config.bootstrap_layer_surface;
             state.layer = boot.layer;
@@ -121,35 +123,27 @@ pub const Runtime = struct {
             state.margin_left = boot.margin_left;
             state.output = -1;
             state.accepts_input = if (boot.accepts_input) 1 else 0;
-            const first_win = try conn.createLayer(.{
+            break :blk try conn.createLayer(.{
                 .state = state,
                 .output = null,
                 .namespace = boot.namespace.ptr,
                 .width = boot.width,
                 .height = boot.height,
             });
-            self.first_win = first_win;
-            try conn.waitReady(first_win);
-        } else {
-            // Bootstrap the implicit view's toplevel before the engine starts.
-            // The first regular window adopts it; creating that surface later,
-            // from a Dart callback, leaves the toplevel's first frame
-            // unpainted.
-            const first_win = try conn.createWindow();
-            self.first_win = first_win;
-            try conn.waitReady(first_win);
-        }
+        } else try conn.createWindow();
+        errdefer if (boot_win) |win| win.destroy(allocator);
+        try conn.waitReady(boot_win.?);
 
         // The one loop in the program. Everything below registers a descriptor
         // or a timer with it and does its work from a callback.
         try self.loop.init(.{ .allocator = allocator });
-        self.loop_ready = true;
+        errdefer self.loop.deinit();
 
         self.vk = try vulkan.Context.init(allocator, io, .{
             .validation = config.vulkan_validation,
             .trace = config.trace,
         });
-        self.vk_ready = true;
+        errdefer self.vk.deinit();
 
         self.app = .{
             .ctx = undefined,
@@ -157,7 +151,10 @@ pub const Runtime = struct {
             .channels = platform_channel.Registry.init(),
             .windowing_spike = config.windowing_spike,
         };
-        self.app_ready = true;
+        errdefer {
+            self.app.deinitViews();
+            self.app.channels.deinit();
+        }
 
         const renderer = app_mod.rendererConfig(&self.vk);
 
@@ -176,7 +173,7 @@ pub const Runtime = struct {
 
         const eng = try engine.Engine.init(
             allocator,
-            self.config,
+            engine_config,
             &renderer,
             &self.app.compositor,
             &self.app,
@@ -186,12 +183,12 @@ pub const Runtime = struct {
             app_mod.vsyncCallback,
             app_mod.viewFocusChangeRequestCallback,
         );
-        self.eng = eng;
+        var windowing_installed = false;
+        errdefer {
+            eng.deinit(allocator);
+            if (windowing_installed) windowing.uninstall();
+        }
         self.app.channels.eng = eng;
-
-        // The engine parses the switches during `Engine.init`; do not keep the
-        // caller's borrowed argv pointers around after that.
-        self.config.engine_args = &.{};
 
         // The globals are only complete once the engine exists.
         self.app.ctx = .{
@@ -209,21 +206,18 @@ pub const Runtime = struct {
         // The C ABI Dart binds to (`filo_window_*`). `app` lives in this
         // heap-allocated struct, so the pointers handed out here stay valid.
         windowing.install(self.app.toHost());
-        self.windowing_installed = true;
+        windowing_installed = true;
 
-        var first_view: ?*app_mod.View = null;
-        if (self.first_win) |first_win| {
-            first_view = try self.app.adoptView(0, first_win);
-            first_view.?.engine_state = .added;
-            self.first_win = null;
-        }
+        const first_view = try self.app.adoptView(0, boot_win.?);
+        first_view.engine_state = .added;
+        boot_win = null;
 
         self.ti = text_input.TextInput.init(allocator, eng);
-        self.ti_ready = true;
+        errdefer self.ti.deinit();
         self.app.channels.text_input = &self.ti;
 
         self.inp = try input.Input.init(eng, &self.ti);
-        self.inp_ready = true;
+        errdefer self.inp.deinit();
         self.inp.setViewResolver(&self.app, app_mod.viewForSurface);
         self.inp.setScaleResolver(&self.app, app_mod.viewScaleForSurface);
         try conn.bindSeat(&self.app.ctx, &self.inp);
@@ -234,7 +228,7 @@ pub const Runtime = struct {
             conn.clipboard.?,
             &self.loop,
         );
-        self.ph_ready = true;
+        errdefer self.ph.deinit();
         self.ph.attach();
         self.app.channels.platform = &self.ph;
 
@@ -253,19 +247,13 @@ pub const Runtime = struct {
         };
         self.app.channels.mouse_cursor = &self.mc;
 
-        const pixel_ratio: f64 = if (first_view) |view|
-            view.win.pixel_ratio
-        else
-            @floatFromInt(conn.display_scale);
-        if (first_view) |view| {
-            eng.sendWindowMetricsForView(
-                0,
-                view.win.physicalWidth(),
-                view.win.physicalHeight(),
-                view.win.pixel_ratio,
-                null,
-            );
-        }
+        eng.sendWindowMetricsForView(
+            0,
+            first_view.win.physicalWidth(),
+            first_view.win.physicalHeight(),
+            first_view.win.pixel_ratio,
+            null,
+        );
         // Without this the engine has no display at all and falls back for the
         // refresh rate it derives its frame budget from.
         if (conn.refresh_mhz != 0) {
@@ -273,7 +261,7 @@ pub const Runtime = struct {
                 .refresh_rate = @as(f64, @floatFromInt(conn.refresh_mhz)) / 1000.0,
                 .width = conn.display_width,
                 .height = conn.display_height,
-                .pixel_ratio = pixel_ratio,
+                .pixel_ratio = first_view.win.pixel_ratio,
             });
             std.debug.print("filo: display {}x{} at {d:.3} Hz\n", .{
                 conn.display_width,
@@ -307,70 +295,29 @@ pub const Runtime = struct {
         app_mod.requestStop(&self.app);
     }
 
-    /// Tear the embedder down and free the runtime. The order mirrors the
-    /// defers the old `main` relied on: handlers, engine, windows, Vulkan, the
-    /// loop, then the Wayland connection.
+    /// Tear down a fully initialized runtime. `init` unwinds its own partial
+    /// failures, so every resource here is known to exist.
     pub fn deinit(self: *Runtime) void {
-        if (self.ph_ready) {
-            self.ph.deinit();
-            self.ph_ready = false;
-        }
-        if (self.inp_ready) {
-            self.inp.deinit();
-            self.inp_ready = false;
-        }
-        if (self.ti_ready) {
-            self.ti.deinit();
-            self.ti_ready = false;
-        }
-        if (self.eng) |eng| {
-            eng.deinit(self.allocator);
-            self.eng = null;
-        }
-        if (self.windowing_installed) {
-            windowing.uninstall();
-            self.windowing_installed = false;
-        }
-        if (self.app_ready) {
-            self.app.deinitViews();
-            self.app.channels.deinit();
-            self.app_ready = false;
-        }
-        if (self.vk_ready) {
-            self.vk.deinit();
-            self.vk_ready = false;
-        }
-        if (self.loop_ready) {
-            self.loop.deinit();
-            self.loop_ready = false;
-        }
-        if (self.first_win) |win| {
-            win.destroy(self.allocator);
-            self.first_win = null;
-        }
-        if (self.conn) |conn| {
-            conn.deinit();
-            self.conn = null;
-        }
+        self.ph.deinit();
+        self.inp.deinit();
+        self.ti.deinit();
 
-        if (self.aot_lib) |value| {
-            self.allocator.free(value);
-            self.aot_lib = null;
-        }
-        if (self.assets) |value| {
-            self.allocator.free(value);
-            self.assets = null;
-        }
-        if (self.icu_data) |value| {
-            self.allocator.free(value);
-            self.icu_data = null;
-        }
-        if (self.engine_lib) |value| {
-            self.allocator.free(value);
-            self.engine_lib = null;
-        }
+        const eng = self.app.ctx.eng;
+        eng.deinit(self.allocator);
+        windowing.uninstall();
+
+        self.app.deinitViews();
+        self.app.channels.deinit();
+        self.vk.deinit();
+        self.loop.deinit();
+        self.app.ctx.conn.deinit();
 
         const allocator = self.allocator;
+        if (self.aot_lib) |value| allocator.free(value);
+        allocator.free(self.assets);
+        allocator.free(self.icu_data);
+        allocator.free(self.engine_lib);
+
         instance_active.store(false, .release);
         allocator.destroy(self);
     }
