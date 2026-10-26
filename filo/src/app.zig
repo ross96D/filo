@@ -768,21 +768,23 @@ pub const App = struct {
         var width: u32 = 0;
         var height: u32 = 0;
 
-        for (info.layers[0..info.layers_count]) |layer_ptr| {
-            const layer = layer_ptr.*;
-            if (layer.type != @as(c.FlutterLayerContentType, @intCast(c.kFlutterLayerContentTypeBackingStore))) continue;
-            const backing_store = layer.unnamed_0.backing_store;
-            if (backing_store == null or backing_store.*.user_data == null) continue;
-
-            const holder: *VulkanBackingStore = @ptrCast(@alignCast(backing_store.*.user_data.?));
-            width = @max(width, holder.store.extent.width);
-            height = @max(height, holder.store.extent.height);
-            if (count < layers.len) {
-                layers[count] = .{
-                    .image = holder.store.image,
-                    .extent = holder.store.extent,
-                };
-                count += 1;
+        if (info.layers_count > 0) {
+            for (info.layers[0..info.layers_count]) |layer_ptr| {
+                const layer = layer_ptr.*;
+                if (layer.type != @as(c.FlutterLayerContentType, @intCast(c.kFlutterLayerContentTypeBackingStore))) continue;
+                const backing_store = layer.unnamed_0.backing_store;
+                if (backing_store == null or backing_store.*.user_data == null) continue;
+    
+                const holder: *VulkanBackingStore = @ptrCast(@alignCast(backing_store.*.user_data.?));
+                width = @max(width, holder.store.extent.width);
+                height = @max(height, holder.store.extent.height);
+                if (count < layers.len) {
+                    layers[count] = .{
+                        .image = holder.store.image,
+                        .extent = holder.store.extent,
+                    };
+                    count += 1;
+                }
             }
         }
 
