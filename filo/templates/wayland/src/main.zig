@@ -23,5 +23,8 @@ pub fn main(init: std.process.Init) !void {
 
     var config = try filo.Config.fromEnv(init.environ_map);
     config.engine_args = engine_args;
-    try filo.run(init.gpa, init.io, config);
+
+    const runtime = try filo.Runtime.init(init.gpa, init.io, config);
+    defer runtime.deinit();
+    try runtime.run();
 }

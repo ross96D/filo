@@ -374,11 +374,8 @@ pub const Runtime = struct {
         instance_active.store(false, .release);
         allocator.destroy(self);
     }
-};
 
-/// Convenience for a host whose lifetime is exactly one embedder run.
-pub fn run(allocator: std.mem.Allocator, io: std.Io, config: manifest.Config) !void {
-    const runtime = try Runtime.init(allocator, io, config);
-    defer runtime.deinit();
-    try runtime.run();
-}
+    pub fn view_by_id(self: *const Runtime, id: engine.ViewId) *app_mod.View {
+        return self.app.views_by_id(id);
+    }
+};

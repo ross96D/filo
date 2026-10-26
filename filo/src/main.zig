@@ -9,5 +9,7 @@ const filo = @import("filo");
 
 pub fn main(init: std.process.Init) !void {
     const config = try filo.Config.fromEnv(init.environ_map);
-    try filo.run(init.gpa, init.io, config);
+    const runtime = try filo.Runtime.init(init.gpa, init.io, config);
+    defer runtime.deinit();
+    try runtime.run();
 }

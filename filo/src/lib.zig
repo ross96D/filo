@@ -23,12 +23,6 @@ pub const Config = manifest.Config;
 /// The embedder instance. Create it with `Runtime.init`, then call `run`.
 pub const Runtime = runtime.Runtime;
 
-/// Start the embedder, run its event loop and tear it down. Equivalent to
-/// `Runtime.init` followed by `run` and `deinit`.
-pub fn run(allocator: std.mem.Allocator, io: std.Io, config: Config) !void {
-    return runtime.run(allocator, io, config);
-}
-
 test {
     _ = @import("manifest.zig");
     _ = @import("runtime.zig");
