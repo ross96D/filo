@@ -72,10 +72,10 @@ class _WindowHostState extends State<WindowHost> {
         layer: FiloLayer.top,
         anchors: FiloLayerAnchors.bottom | FiloLayerAnchors.left,
         keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
-        margin: const FiloInsets(top: 8, right: 8),
+        margin: const FiloInsets.all(20),
         namespace: 'filo',
       ),
-      size: const Size(300, 300),
+      // size: const Size(300, 300),
     );
     setState(() => _layer = controller);
   }
@@ -120,32 +120,36 @@ class LayerPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      debugShowMaterialGrid: false,
-      theme: ThemeData.light(useMaterial3: true),
-      home: Material(
-        color: const Color(0xff202124),
-        child: Padding(
-          padding: const EdgeInsets.all(0),
-          child: Column(
-            spacing: 10,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              const Text(
-                'Layer surface',
-                style: TextStyle(color: Colors.white, fontSize: 20),
-              ),
-              const Text(
-                'top layer, anchored top-right',
-                style: TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-              FilledButton(
-                style: ButtonStyle(visualDensity: VisualDensity(horizontal: 0, vertical: 0)),
-                onPressed: onClose,
-                child: const Text('Close panel'),
-              ),
-            ],
+    return SizedBox(
+      height: 300,
+      width: 300,
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        debugShowMaterialGrid: false,
+        theme: ThemeData.light(useMaterial3: true),
+        home: Material(
+          color: const Color(0xff202124),
+          child: Padding(
+            padding: const EdgeInsets.all(0),
+            child: Column(
+              spacing: 10,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                const Text(
+                  'Layer surface',
+                  style: TextStyle(color: Colors.white, fontSize: 20),
+                ),
+                const Text(
+                  'top layer, anchored top-right',
+                  style: TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                FilledButton(
+                  style: ButtonStyle(visualDensity: VisualDensity(horizontal: 0, vertical: 0)),
+                  onPressed: onClose,
+                  child: const Text('Close panel'),
+                ),
+              ],
+            ),
           ),
         ),
       ),

@@ -374,7 +374,10 @@ class FiloWindowRequest {
   /// The xdg-shell role to create.
   final FiloWindowKind kind;
 
-  /// Preferred content size. Null or zero means "size to content".
+  /// Preferred content size, or null to size the window to its content.
+  ///
+  /// A zero dimension is valid for a layer surface anchored to both opposite
+  /// edges on that axis; the compositor then chooses the size.
   final Size? size;
 
   /// Size constraints, or null for unconstrained.
@@ -383,7 +386,9 @@ class FiloWindowRequest {
   /// Whether the user may resize the window.
   final bool resizable;
 
-  /// Whether the window should track its content size.
+  /// Whether the backend should derive the window size from its rendered
+  /// content. Non-resizable windows keep tracking later content changes;
+  /// resizable windows only use their content for the initial size.
   final bool sizedToContent;
 
   /// Whether a dialog is modal to [parentViewId].

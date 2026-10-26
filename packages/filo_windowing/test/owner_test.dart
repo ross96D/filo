@@ -52,6 +52,69 @@ void main() {
     },
   );
 
+  test('sizedToContent controllers request content sizing', () {
+    final regular = RegularWindowController.sizedToContent(
+      delegate: _RegularDelegate(),
+      constraints: const BoxConstraints(minWidth: 120, minHeight: 80),
+      resizable: false,
+      title: 'sized',
+    );
+
+    final regularRequest = backend.requests.last;
+    expect(regularRequest.kind, FiloWindowKind.toplevel);
+    expect(regularRequest.size, isNull);
+    expect(
+      regularRequest.constraints,
+      const BoxConstraints(minWidth: 120, minHeight: 80),
+    );
+    expect(regularRequest.sizedToContent, isTrue);
+    expect(regularRequest.resizable, isFalse);
+    expect(regularRequest.title, 'sized');
+    expect(regular.rootView, same(view));
+
+    final dialog = DialogWindowController.sizedToContent(
+      delegate: _DialogDelegate(),
+      resizable: true,
+      title: 'sized dialog',
+    );
+
+    final dialogRequest = backend.requests.last;
+    expect(dialogRequest.kind, FiloWindowKind.toplevel);
+    expect(dialogRequest.size, isNull);
+    expect(dialogRequest.sizedToContent, isTrue);
+    expect(dialogRequest.resizable, isTrue);
+    expect(dialogRequest.title, 'sized dialog');
+    expect(dialogRequest.parentViewId, -1);
+    expect(dialog.rootView, same(view));
+  });
+
+  test('a sizedToContent window can still request an explicit size', () {
+    final controller = RegularWindowController.sizedToContent(
+      delegate: _RegularDelegate(),
+    );
+    final id = backend.lastViewId!;
+
+    controller.setSize(const Size(320, 200));
+    controller.setConstraints(
+      const BoxConstraints(minWidth: 100, minHeight: 80),
+    );
+
+    expect(backend.calls, contains('setSize:$id:320.0x200.0'));
+    expect(backend.calls, contains('setConstraints:$id'));
+  });
+
+  test('a layer window with no size is content-sized by default', () {
+    owner.createLayerWindowController(
+      delegate: _RegularDelegate(),
+      layerSurface: const FiloLayerSurface(),
+    );
+
+    final request = backend.requests.single;
+    expect(request.kind, FiloWindowKind.layer);
+    expect(request.size, isNull);
+    expect(request.sizedToContent, isTrue);
+  });
+
   test('close requests call the delegate directly', () {
     final delegate = _RegularDelegate();
     owner.createRegularWindowController(

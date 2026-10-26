@@ -21,6 +21,11 @@ pub const max_content_size = 4_096;
 /// `wl_output.scale` on compositors older than core Wayland 6.
 pub const default_pixel_ratio: f64 = 1.0;
 
+/// Bit for [Window.content_axes]: the width follows the rendered content.
+pub const content_axis_width: u8 = 1 << 0;
+/// Bit for [Window.content_axes]: the height follows the rendered content.
+pub const content_axis_height: u8 = 1 << 1;
+
 /// The role a surface has. Toplevels are regular windows, dialogs and
 /// satellites; popups are tooltips and popups; a layer surface is the
 /// wlr-layer-shell role (a bar, wallpaper, overlay, …).
@@ -61,15 +66,18 @@ pub const Window = struct {
     /// accurate than the output-wide fallback: it follows the surface between
     /// outputs.
     scale_from_compositor: bool = false,
-    /// Whether the platform should derive the surface size from the first
-    /// rendered frame. Popups and sized-to-content windows set this.
+    /// Which axes follow the size of the rendered content. A layer surface
+    /// anchored to opposite edges has that axis owned by the compositor and
+    /// does not track it. Zero means the window is not sized to content.
     ///
-    /// It is atomic because the raster thread checks it in `presentView` while
-    /// the main thread may adopt the implicit view as sized-to-content.
-    sized_to_content: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    /// Whether later frame sizes should keep resizing the surface. For a
-    /// resizable sized-to-content toplevel this is cleared after the initial
-    /// size has been applied; a popup and a non-resizable window keep tracking.
+    /// It is atomic because the raster thread reads it in `presentView` while
+    /// the main thread can stop content sizing after the initial frame.
+    content_axes: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+    /// Whether the raster thread should compare the extent of a presented
+    /// frame with the last applied content size. This stays set for
+    /// non-resizable content-sized windows. It is cleared once a resizable
+    /// toplevel has completed its initial auto-size, so later user resizes are
+    /// not overridden by the content.
     track_content_size: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     resizable: bool = true,
     /// Limits for engine metrics while tracking the content size, in logical
@@ -245,22 +253,47 @@ pub const Window = struct {
 
     /// Change the layer surface's requested size. The compositor may ignore it
     /// when the surface is anchored to opposite edges.
+    ///
+    /// A zero request for a stretched axis is not a zero surface size: the
+    /// compositor keeps choosing it, so the cached size stays at the last
+    /// configured value.
     pub fn setSize(self: *Window, size: windowing.Size) void {
         const layer_surface = self.layerRole() orelse return;
-        self.width = size.width;
-        self.height = size.height;
+        const anchors = self.layer_state.anchor;
+        if (!stretchesWidth(anchors)) self.width = size.width;
+        if (!stretchesHeight(anchors)) self.height = size.height;
         layer_surface.setSize(size.width, size.height);
         self.resized = true;
         self.commit();
     }
 
     /// Copy the sizing flags and bounds out of a windowing request.
+    ///
+    /// For a layer surface, an axis anchored to both opposite edges is owned
+    /// by the compositor. Content sizing only applies to the remaining axes.
     pub fn applyRequest(self: *Window, req: *const windowing.WindowRequest) void {
         const sized = req.sized_to_content != 0;
         self.resizable = req.resizable != 0;
-        self.sized_to_content.store(sized, .release);
-        self.track_content_size.store(sized, .release);
+
+        // A layer request carries the authoritative anchors, even when the
+        // surface itself has not been reconfigured yet (hot restart).
+        const anchors = if (self.isLayer()) req.layer_surface.anchor else 0;
+        var axes: u8 = 0;
+        if (sized) {
+            if (!stretchesWidth(anchors)) axes |= content_axis_width;
+            if (!stretchesHeight(anchors)) axes |= content_axis_height;
+        }
+        self.content_axes.store(axes, .release);
+        self.track_content_size.store(axes != 0, .release);
         self.setContentConstraints(req.min_size, req.max_size);
+    }
+
+    /// Stop deriving this window's size from its content. Used once a
+    /// resizable sized-to-content toplevel has completed its initial size, and
+    /// when the caller explicitly requests a size.
+    pub fn stopSizingToContent(self: *Window) void {
+        self.content_axes.store(0, .release);
+        self.track_content_size.store(false, .release);
     }
 
     /// Update the limits used for engine metrics. A zero maximum means
@@ -273,7 +306,15 @@ pub const Window = struct {
     }
 
     pub fn isSizedToContent(self: *const Window) bool {
-        return self.sized_to_content.load(.acquire);
+        return self.content_axes.load(.acquire) != 0;
+    }
+
+    pub fn tracksContentWidth(self: *const Window) bool {
+        return self.content_axes.load(.acquire) & content_axis_width != 0;
+    }
+
+    pub fn tracksContentHeight(self: *const Window) bool {
+        return self.content_axes.load(.acquire) & content_axis_height != 0;
     }
 
     pub fn isTrackingContentSize(self: *const Window) bool {
@@ -313,34 +354,93 @@ pub const Window = struct {
 
     /// Bounds for the engine metrics event, or null for the normal tight case.
     /// The event is in physical pixels, while the stored limits are logical.
+    ///
+    /// A content-sized axis gets the request's bounds so the framework can
+    /// choose a new content size. An axis owned by the compositor (a stretched
+    /// layer surface) stays tight, so the framework fills the configured size
+    /// on that axis.
     pub fn metricsConstraints(self: *const Window) ?engine.WindowConstraints {
-        if (!self.isTrackingContentSize()) return null;
+        const axes = self.content_axes.load(.acquire);
+        if (axes == 0) return null;
+
+        const physical_width = self.physicalWidth();
+        const physical_height = self.physicalHeight();
         return .{
-            .min_width = scale.physical(self.content_min_width, self.pixel_ratio),
-            .min_height = scale.physical(self.content_min_height, self.pixel_ratio),
-            .max_width = scale.physical(self.content_max_width, self.pixel_ratio),
-            .max_height = scale.physical(self.content_max_height, self.pixel_ratio),
+            .min_width = if (axes & content_axis_width != 0)
+                scale.physical(self.content_min_width, self.pixel_ratio)
+            else
+                physical_width,
+            .min_height = if (axes & content_axis_height != 0)
+                scale.physical(self.content_min_height, self.pixel_ratio)
+            else
+                physical_height,
+            .max_width = if (axes & content_axis_width != 0)
+                scale.physical(self.content_max_width, self.pixel_ratio)
+            else
+                physical_width,
+            .max_height = if (axes & content_axis_height != 0)
+                scale.physical(self.content_max_height, self.pixel_ratio)
+            else
+                physical_height,
         };
     }
 
     /// Apply a size derived from a rendered frame to a toplevel or layer
     /// surface. Popups get their size through `xdg_popup.reposition` instead.
+    ///
+    /// Only content-sized axes are updated; a layer axis owned by the
+    /// compositor keeps its configured size.
     pub fn applyContentSize(self: *Window, width: u32, height: u32) void {
-        self.width = width;
-        self.height = height;
+        const axes = self.content_axes.load(.acquire);
+        if (axes & content_axis_width != 0) self.width = width;
+        if (axes & content_axis_height != 0) self.height = height;
+
         if (self.layerRole()) |layer_surface| {
-            layer_surface.setSize(width, height);
+            // A stretched axis is owned by the compositor: request zero so it
+            // keeps choosing that dimension.
+            const anchors = self.layer_state.anchor;
+            layer_surface.setSize(
+                if (stretchesWidth(anchors)) 0 else self.width,
+                if (stretchesHeight(anchors)) 0 else self.height,
+            );
             self.commit();
             self.resized = true;
             return;
         }
         if (!self.resizable) {
-            const fixed = windowing.Size{ .width = width, .height = height };
+            const fixed = windowing.Size{ .width = self.width, .height = self.height };
             self.setMinSize(fixed);
             self.setMaxSize(fixed);
             self.commit();
         }
         self.resized = true;
+    }
+
+    /// Apply an explicit size requested through the windowing API. This leaves
+    /// content-sizing mode and asks the engine to draw at the requested size.
+    pub fn applyRequestedSize(self: *Window, size: windowing.Size) void {
+        self.stopSizingToContent();
+        self.width = size.width;
+        self.height = size.height;
+        if (!self.resizable) {
+            self.setMinSize(size);
+            self.setMaxSize(size);
+            self.commit();
+        }
+        self.resized = true;
+    }
+
+    /// Clamp the cached size to the current content constraints. Used after a
+    /// constraint update so the next metrics event stays valid even before the
+    /// compositor confirms the new native size.
+    pub fn clampToContentConstraints(self: *Window) void {
+        const axes = self.content_axes.load(.acquire);
+        if (axes & content_axis_width != 0) {
+            self.width = std.math.clamp(self.width, self.content_min_width, self.content_max_width);
+        }
+        if (axes & content_axis_height != 0) {
+            self.height = std.math.clamp(self.height, self.content_min_height, self.content_max_height);
+        }
     }
 
     fn boundedMin(value: u32) u32 {
@@ -485,16 +585,7 @@ pub const Window = struct {
                 // size already, and any rebuild it owes is driven by the size it
                 // reports per frame.
                 const size = configuredSize(configure.width, configure.height) orelse return;
-                if (size[0] == self.width and size[1] == self.height) {
-                    // A non-resizable sized-to-content toplevel stopped
-                    // tracking while it asked the compositor for the content
-                    // size. A matching configure is the confirmation that lets
-                    // it track later content changes again.
-                    if (self.isSizedToContent() and !self.resizable) {
-                        self.track_content_size.store(true, .release);
-                    }
-                    return;
-                }
+                if (size[0] == self.width and size[1] == self.height) return;
 
                 self.width = size[0];
                 self.height = size[1];
@@ -569,13 +660,6 @@ pub const Window = struct {
                 // Acknowledge the configure with the commit that follows it.
                 self.surface.commit();
                 self.configured = true;
-
-                // A content-sized layer surface stops tracking while it asks
-                // for its content size. A matching configure is the
-                // confirmation that lets it track later content changes again.
-                if (self.isSizedToContent() and !self.resizable and !changed) {
-                    self.track_content_size.store(true, .release);
-                }
             },
             // The compositor will not show this surface any more. Treat it as
             // a close request so the controller can destroy and recreate it.
@@ -673,14 +757,111 @@ fn keyboardInteractivityFromInt(value: i32) ?zwlr.LayerSurfaceV1.KeyboardInterac
     };
 }
 
+fn stretchesWidth(anchor: u32) bool {
+    return anchor & (windowing.LayerAnchor.left | windowing.LayerAnchor.right) ==
+        (windowing.LayerAnchor.left | windowing.LayerAnchor.right);
+}
+
+fn stretchesHeight(anchor: u32) bool {
+    return anchor & (windowing.LayerAnchor.top | windowing.LayerAnchor.bottom) ==
+        (windowing.LayerAnchor.top | windowing.LayerAnchor.bottom);
+}
+
 /// A zero layer-surface dimension is only legal when both opposite edges are
 /// anchored: the compositor owns that dimension then.
 pub fn layerSizeValid(anchor: u32, width: u32, height: u32) bool {
-    const horizontal = anchor & (windowing.LayerAnchor.left | windowing.LayerAnchor.right) ==
-        (windowing.LayerAnchor.left | windowing.LayerAnchor.right);
-    const vertical = anchor & (windowing.LayerAnchor.top | windowing.LayerAnchor.bottom) ==
-        (windowing.LayerAnchor.top | windowing.LayerAnchor.bottom);
-    return (width != 0 or horizontal) and (height != 0 or vertical);
+    return (width != 0 or stretchesWidth(anchor)) and
+        (height != 0 or stretchesHeight(anchor));
+}
+
+test "content-sized metrics stay loose per content axis" {
+    const testing = std.testing;
+
+    var win: Window = undefined;
+    win.pixel_ratio = 2;
+    win.width = 320;
+    win.height = 40;
+    win.content_min_width = 100;
+    win.content_min_height = 10;
+    win.content_max_width = 900;
+    win.content_max_height = 90;
+
+    win.content_axes.store(content_axis_width | content_axis_height, .release);
+    const both = win.metricsConstraints().?;
+    try testing.expectEqual(@as(usize, 200), both.min_width);
+    try testing.expectEqual(@as(usize, 1800), both.max_width);
+    try testing.expectEqual(@as(usize, 20), both.min_height);
+    try testing.expectEqual(@as(usize, 180), both.max_height);
+
+    // Only the height is content-sized; the width stays tight at the current
+    // compositor-assigned size (320 logical -> 640 physical).
+    win.content_axes.store(content_axis_height, .release);
+    const height_only = win.metricsConstraints().?;
+    try testing.expectEqual(@as(usize, 640), height_only.min_width);
+    try testing.expectEqual(@as(usize, 640), height_only.max_width);
+    try testing.expectEqual(@as(usize, 20), height_only.min_height);
+    try testing.expectEqual(@as(usize, 180), height_only.max_height);
+
+    win.content_axes.store(0, .release);
+    try testing.expect(win.metricsConstraints() == null);
+}
+
+test "content sizing only tracks layer axes the compositor does not own" {
+    const testing = std.testing;
+
+    var win: Window = undefined;
+    var req = std.mem.zeroes(windowing.WindowRequest);
+    req.sized_to_content = 1;
+    req.layer_surface.anchor = windowing.LayerAnchor.left | windowing.LayerAnchor.right;
+
+    win.role = .{ .layer = undefined };
+    win.applyRequest(&req);
+    try testing.expect(!win.tracksContentWidth());
+    try testing.expect(win.tracksContentHeight());
+    try testing.expect(win.isTrackingContentSize());
+
+    // A toplevel has no layer anchors, so it tracks both axes.
+    win.role = .{ .toplevel = undefined };
+    win.applyRequest(&req);
+    try testing.expect(win.tracksContentWidth());
+    try testing.expect(win.tracksContentHeight());
+
+    // Both axes stretched: nothing is content-sized.
+    win.role = .{ .layer = undefined };
+    req.layer_surface.anchor = windowing.LayerAnchor.top |
+        windowing.LayerAnchor.bottom |
+        windowing.LayerAnchor.left |
+        windowing.LayerAnchor.right;
+    win.applyRequest(&req);
+    try testing.expect(!win.isSizedToContent());
+    try testing.expect(!win.isTrackingContentSize());
+}
+
+test "stopping content sizing clears both axes" {
+    const testing = std.testing;
+
+    var win: Window = undefined;
+    win.content_axes = std.atomic.Value(u8).init(content_axis_width | content_axis_height);
+    win.track_content_size = std.atomic.Value(bool).init(true);
+
+    win.stopSizingToContent();
+    try testing.expect(!win.isSizedToContent());
+    try testing.expect(!win.isTrackingContentSize());
+}
+
+test "an explicit size leaves content sizing" {
+    const testing = std.testing;
+
+    var win: Window = undefined;
+    win.content_axes = std.atomic.Value(u8).init(content_axis_width | content_axis_height);
+    win.track_content_size = std.atomic.Value(bool).init(true);
+    win.resizable = true;
+
+    win.applyRequestedSize(.{ .width = 500, .height = 300 });
+    try testing.expectEqual(@as(u32, 500), win.width);
+    try testing.expectEqual(@as(u32, 300), win.height);
+    try testing.expect(!win.isSizedToContent());
+    try testing.expect(win.resized);
 }
 
 test "a configure that leaves the size to us is not a resize" {

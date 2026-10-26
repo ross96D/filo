@@ -82,6 +82,16 @@ a client no way to position or move an `xdg_toplevel`, so the satellite contract
 (initial positioner, relative offset tracking, reparenting without moving)
 cannot be honoured on Wayland.
 
+### Size to content
+
+`RegularWindowController.sizedToContent` and
+`DialogWindowController.sizedToContent` are supported. The window is initially
+sized from the frame Flutter renders, subject to the given constraints. A
+non-resizable window keeps following later content changes; a resizable window
+only uses its content for the initial size, after which the user controls the
+size. Calling `setSize` leaves content-sizing mode and applies the requested
+size.
+
 ### Layer windows
 
 A layer window is a `zwlr_layer_shell_v1` surface: a bar, wallpaper, overlay, or

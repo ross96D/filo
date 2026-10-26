@@ -35,7 +35,7 @@ may create a new view and return another id.
 | `size` | Preferred logical content size; null means size to content |
 | `constraints` | Logical min/max size constraints |
 | `resizable` | Whether the user may resize after creation |
-| `sizedToContent` | Hint that the window should track its content |
+| `sizedToContent` | Whether the backend derives the window size from its content |
 | `modal` | Whether a dialog is modal to `parentViewId` |
 | `decorated` | Whether the window has decorations |
 | `title` | Initial title |
@@ -63,6 +63,40 @@ initialized before any callback is delivered:
 Do not invoke observer callbacks for a new window during `createWindow`; return
 the initial state in the handle instead. Callbacks may be invoked once
 `observe` has returned.
+
+## Size to content
+
+When `size` is null, `sizedToContent` is true and the backend owns the window
+size until the content asks for a different one. It must:
+
+- create the native window at a valid placeholder size: the minimum constraint,
+  or 1×1 when unconstrained;
+- report loose view constraints (`has_constraints` with the constraint bounds in
+  physical pixels) so the framework can choose the content size;
+- treat the extent of the presented frame as the content size. The frame extent
+  is the `FlutterBackingStoreConfig.size` passed to the backing-store callback,
+  or `FlutterLayer.size` / the backing-store extent in the present callback.
+  Convert it from physical to logical pixels before resizing the native
+  surface;
+- keep tracking and keep reporting loose constraints for a non-resizable
+  window, so a later content change resizes the window again;
+- for a resizable window, stop after the initial content-driven resize and send
+  tight constraints at that size. Later user resizes are reported as normal
+  configures;
+- for a layer surface, content-size only the axes that are not anchored to both
+  opposite edges. An anchored axis is owned by the compositor and stays tight
+  at the configured size;
+- when constraints change, update both the native minimum/maximum and the
+  bounds used for loose metrics, then request a relayout;
+- when `setSize` is called, leave size-to-content mode and apply the requested
+  size.
+
+A zero layer-surface dimension means the compositor owns that axis; it is not
+the same as content sizing.
+
+The backend learns the content size only from rendered frames. It must not use
+`FlutterView.physicalSize` or the last metrics width/height: those are the
+window size last reported to the engine, not the size the framework chose.
 
 ## Observing a window
 

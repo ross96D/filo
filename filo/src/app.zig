@@ -49,11 +49,18 @@ pub const View = struct {
     /// The title the bridge last set, kept so the handle/getter can return it.
     title: [256]u8 = @splat(0),
     title_len: usize = 0,
-    /// The physical extent the surface currently has, packed as
-    /// width << 32 | height. This matches the buffer/backing-store pixels
-    /// `presentView` sees. `presentView` runs on the raster thread, so it
-    /// cannot read the main-thread window fields directly.
+    /// The extent of the last frame observed for this view, packed as
+    /// width << 32 | height. It starts at the native window size at adoption
+    /// and is updated from presented frames, never from a compositor
+    /// configure: it is the baseline for detecting a content-size change.
+    /// `presentView` runs on the raster thread, so it cannot read the
+    /// main-thread window fields directly.
     content_size: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    /// A content resize has been requested at least once. The first frame is
+    /// always applied, even when it happens to match the placeholder size, so
+    /// a non-resizable window gets pinned and a resizable one finishes its
+    /// initial auto-size.
+    content_frame_seen: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// A content resize is queued or waiting for the popup configure.
     content_resize_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// A buffer-scale change is in flight. Content-size tracking is paused until
@@ -94,11 +101,9 @@ pub const View = struct {
     /// Drain the events the Wayland listeners recorded and hand them to the
     /// registered callbacks. Runs on the main (UI) thread.
     fn emitWindowEvents(self: *View, eng: *engine.Engine) void {
-        if (self.win.resized) {
-            // The cached extent is what the raster thread compares frames
-            // against, so it is physical, like the frame it came from.
-            self.updateContentSize(self.win.physicalWidth(), self.win.physicalHeight());
-        }
+        // Do not update `content_size` here. It is the last frame extent, not
+        // the native size; a compositor configure must not reset the baseline
+        // the raster thread compares content changes against.
         if (self.win.scale_dirty) {
             // The raster thread applies this with the first compatible frame;
             // see `vulkan.Surface.applyPendingBufferScale`. Content tracking is
@@ -353,6 +358,10 @@ pub const App = struct {
         view.added = true;
 
         view.win.applyRequest(req);
+        // The view may have survived a hot restart. Re-apply the first
+        // content-sized frame so sizing state (pinning or the resizable
+        // one-shot) is established again.
+        view.content_frame_seen.store(false, .release);
         // Send the first metrics before any extra toplevel requests. The view
         // already has the compositor's configured size; a title/constraint
         // commit here can otherwise race the first frame.
@@ -362,7 +371,13 @@ pub const App = struct {
             view.win.setTitle(title);
             view.setViewTitleZ(req.title);
         }
-        if (req.resizable == 0) {
+        if (req.sized_to_content != 0) {
+            // The content size is not known yet. Keep the requested bounds
+            // until the first frame pins a non-resizable window to its content
+            // size (see `runContentResize`).
+            view.win.setMinSize(req.min_size);
+            view.win.setMaxSize(req.max_size);
+        } else if (req.resizable == 0) {
             const fixed = if (req.size.width > 0 and req.size.height > 0)
                 windowing.Size{ .width = req.size.width, .height = req.size.height }
             else
@@ -533,6 +548,19 @@ pub const App = struct {
         const size = layerRequestSize(req);
         const current = view.win.layer_state;
 
+        // Always refresh the sizing state: the new isolate may carry different
+        // constraints. Then decide whether the surface itself has to change.
+        view.win.applyRequest(req);
+        view.content_frame_seen.store(false, .release);
+
+        // A content-sized axis keeps its current size; a compositor-owned or
+        // explicitly sized axis uses the request. This avoids shrinking a
+        // content-sized surface back to its placeholder on hot restart.
+        const target = windowing.Size{
+            .width = if (view.win.tracksContentWidth()) view.win.width else size.width,
+            .height = if (view.win.tracksContentHeight()) view.win.height else size.height,
+        };
+
         // The startup surface may already match this request exactly. Keep it
         // as-is: reconfiguring a layer surface that was adopted before the
         // engine started races the first frame.
@@ -545,15 +573,14 @@ pub const App = struct {
             current.margin_bottom == state.margin_bottom and
             current.margin_left == state.margin_left and
             current.accepts_input == state.accepts_input and
-            view.win.width == size.width and
-            view.win.height == size.height;
+            view.win.width == target.width and
+            view.win.height == target.height;
 
         if (!same_surface) {
-            view.win.applyRequest(req);
             // Apply the size first so the layer-state validation sees the new
             // dimensions, then the state. Both are double-buffered and commit.
             view.win.configured = false;
-            view.win.setSize(size);
+            view.win.setSize(target);
             try view.win.applyLayerSurface(state);
         }
 
@@ -750,10 +777,20 @@ pub const App = struct {
         // (logical size * new scale), which is not a content change: skip the
         // comparison until a frame at the new scale has been presented.
         const scale_transition = view.scale_transition.load(.acquire);
+        const first_content_frame = !view.content_frame_seen.load(.acquire);
+        // A popup already presents at the positioner's size; only reposition
+        // it when the content actually differs. A toplevel always applies its
+        // first frame, even when it matches the placeholder, so a non-resizable
+        // window gets pinned and a resizable one ends its initial auto-size.
+        const force_first = first_content_frame and !view.win.isPopup();
+        const content_changed =
+            (view.win.tracksContentWidth() and width != view.contentWidth()) or
+            (view.win.tracksContentHeight() and height != view.contentHeight());
         if (scale_transition == 0 and
             view.win.isTrackingContentSize() and
-            (width != view.contentWidth() or height != view.contentHeight()))
+            (force_first or content_changed))
         {
+            view.content_frame_seen.store(true, .release);
             self.postContentResize(view, width, height);
             if (view.win.isPopup()) return true;
         }
@@ -900,14 +937,18 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        // xdg-shell leaves resizing to the compositor, but a layer surface's
-        // size is a client request.
+        // A layer surface's size is a client request. For the xdg-shell roles
+        // there is no resize request, but an explicit setSize still leaves
+        // content-sizing mode and asks the engine to draw at that size.
         if (view.win.isLayer()) {
             if (!window.layerSizeValid(view.win.layer_state.anchor, size.width, size.height)) {
                 return .invalid_argument;
             }
+            view.win.stopSizingToContent();
             view.win.setSize(size);
+            return .ok;
         }
+        view.win.applyRequestedSize(size);
         return .ok;
     }
 
@@ -919,8 +960,22 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
+        view.win.setContentConstraints(min, max);
         view.win.setMinSize(min);
         view.win.setMaxSize(max);
+
+        if (view.win.isSizedToContent()) {
+            // The new bounds replace the ones used for loose metrics. Unpin
+            // the native window, clamp the cached size so the metrics event is
+            // valid, and schedule a relayout so the content can pick a new
+            // size.
+            view.win.clampToContentConstraints();
+            if (view.win.isLayer()) {
+                view.win.applyContentSize(view.win.width, view.win.height);
+            } else {
+                view.win.resized = true;
+            }
+        }
         view.win.commit();
         return .ok;
     }
@@ -1240,6 +1295,10 @@ fn runContentResize(user_data: ?*anyopaque) void {
         view.win.reposition(xdg_positioner);
         view.win.positioner = positioner;
         view.win.commit();
+        // The popup keeps its content-sized baseline even if the compositor
+        // adjusts the final geometry in its configure; otherwise the next
+        // identical frame would request another reposition.
+        view.updateContentSize(physical_width, physical_height);
         // The configure event that follows clears the pending flag and sends
         // the new metrics.
         return;
@@ -1247,10 +1306,12 @@ fn runContentResize(user_data: ?*anyopaque) void {
 
     view.win.applyContentSize(width, height);
     view.updateContentSize(physical_width, physical_height);
-    // Wait for the compositor to confirm the size before tracking again. A
-    // tiled compositor may keep its own size, and resubmitting the frame size
-    // every frame would never converge.
-    view.win.track_content_size.store(false, .release);
+    if (view.win.resizable) {
+        // A resizable sized-to-content toplevel only auto-sizes once. From now
+        // on the user drives the size and Flutter fills the window, so switch
+        // the metrics back to tight constraints.
+        view.win.stopSizingToContent();
+    }
     view.content_resize_pending.store(false, .release);
 }
 

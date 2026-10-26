@@ -101,12 +101,16 @@ pub const Positioner = extern struct {
 /// One `createWindow` request. All sizes are logical pixels.
 pub const WindowRequest = extern struct {
     kind: i32,
-    /// Preferred content size; 0 × 0 means size to content.
+    /// Preferred content size. A zero dimension is only meaningful for a layer
+    /// axis anchored to both opposite edges; the compositor chooses it then.
     size: Size,
     // 0 / maxInt(i32) mean unbounded.
     min_size: Size,
     max_size: Size,
     resizable: u8,
+    /// Derive the window size from the rendered content. Non-resizable windows
+    /// keep tracking later content changes; resizable windows only use their
+    /// content for the initial size.
     sized_to_content: u8,
     modal: u8,
     decorated: u8,
