@@ -13,6 +13,9 @@ const windowing = @import("../windowing.zig");
 const default_width = 800;
 const default_height = 600;
 
+/// The size a window starts with when the compositor leaves it to us.
+pub const default_size = windowing.Size{ .width = default_width, .height = default_height };
+
 /// The largest size a popup or content-sized window can ask the engine for.
 pub const max_content_size = 4_096;
 
@@ -26,30 +29,12 @@ pub const content_axis_width: u8 = 1 << 0;
 /// Bit for [Window.content_axes]: the height follows the rendered content.
 pub const content_axis_height: u8 = 1 << 1;
 
-/// The role a surface has. Toplevels are regular windows, dialogs and
-/// satellites; popups are tooltips and popups; a layer surface is the
-/// wlr-layer-shell role (a bar, wallpaper, overlay, …).
-pub const Role = union(enum) {
-    toplevel: *xdg.Toplevel,
-    popup: *xdg.Popup,
-    layer: *zwlr.LayerSurfaceV1,
-};
-
 /// One window: a surface and its xdg-shell or layer-shell role. The connection
 /// it lives on, the engine it draws for, and the loop that drives it are owned
 /// elsewhere and passed in where they are needed.
 pub const Window = struct {
     surface: *wl.Surface,
-    /// Null for layer surfaces: wlr-layer-shell replaces xdg_surface.
-    xdg_surface: ?*xdg.Surface = null,
     role: Role,
-
-    /// The layer-surface properties last applied. The namespace pointer is not
-    /// retained; only the double-buffered state is.
-    layer_state: windowing.LayerSurface = std.mem.zeroes(windowing.LayerSurface),
-    /// Layer surfaces are composited with premultiplied alpha, so panels and
-    /// overlays can have transparent regions.
-    transparent: bool = false,
 
     configured: bool = false,
     /// Size the compositor last asked for, in surface (logical) pixels. Starts
@@ -73,12 +58,6 @@ pub const Window = struct {
     /// It is atomic because the raster thread reads it in `presentView` while
     /// the main thread can stop content sizing after the initial frame.
     content_axes: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-    /// Whether the raster thread should compare the extent of a presented
-    /// frame with the last applied content size. This stays set for
-    /// non-resizable content-sized windows. It is cleared once a resizable
-    /// toplevel has completed its initial auto-size, so later user resizes are
-    /// not overridden by the content.
-    track_content_size: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     resizable: bool = true,
     /// Limits for engine metrics while tracking the content size, in logical
     /// pixels. `metricsConstraints` converts them to physical pixels.
@@ -89,150 +68,186 @@ pub const Window = struct {
     /// Set by a configure that changed the size, drained by the event loop,
     /// which forwards it to the engine.
     resized: bool = false,
-    /// A popup configure arrived. The event loop clears a pending content
-    /// resize, even if the compositor kept the old size.
-    popup_configured: bool = false,
     /// Set when the compositor asks the window to close.
     closing: bool = false,
-    /// Bitmask of `windowing.ToplevelState`; several may be set at once.
-    state_bits: u32 = 0,
-    /// The compositor sent a new state set since the last drain.
-    state_dirty: bool = false,
-    /// Bitmask of `windowing.WmCapabilities`.
-    wm_capabilities: u32 = 0,
-    /// The compositor sent new capabilities since the last drain.
-    capabilities_dirty: bool = false,
-    /// Popups: top-left corner relative to the parent client area.
-    offset_from_parent: windowing.Offset = .{ .x = 0, .y = 0 },
-    /// The compositor moved the popup since the last drain.
-    offset_dirty: bool = false,
-    /// The compositor dismissed the popup.
-    popup_done: bool = false,
-    /// The last positioner applied to a popup, so an update can change just the
-    /// anchor rectangle.
-    positioner: windowing.Positioner = std.mem.zeroes(windowing.Positioner),
-    /// Token for the next `xdg_popup.reposition`.
-    reposition_token: u32 = 0,
 
-    /// Install a toplevel window on freshly created surface/xdg/toplevel
-    /// proxies.
+    /// The role a surface has. Each variant owns everything that only makes
+    /// sense for it: the xdg surface, popup positioner, layer-shell state, and
+    /// the events waiting to be drained for that role.
+    pub const Role = union(enum) {
+        toplevel: Toplevel,
+        popup: Popup,
+        layer: Layer,
+    };
+
+    /// Toplevels are regular windows, dialogs and satellites.
+    pub const Toplevel = struct {
+        xdg_surface: *xdg.Surface,
+        toplevel: *xdg.Toplevel,
+        /// Bitmask of `windowing.ToplevelState`; several may be set at once.
+        state_bits: u32 = 0,
+        /// The compositor sent a new state set since the last drain.
+        state_dirty: bool = false,
+        /// Bitmask of `windowing.WmCapabilities`.
+        wm_capabilities: u32 = 0,
+        /// The compositor sent new capabilities since the last drain.
+        capabilities_dirty: bool = false,
+
+        pub fn toplevelState(self: *const Toplevel) u32 {
+            return self.state_bits;
+        }
+
+        pub fn wmCapabilities(self: *const Toplevel) u32 {
+            return self.wm_capabilities;
+        }
+
+        /// Queue the xdg_toplevel requests below. They are double-buffered, so
+        /// the caller commits the surface once after a batch.
+        pub fn setTitle(self: *Toplevel, title: [*:0]const u8) void {
+            self.toplevel.setTitle(title);
+        }
+
+        pub fn setMinSize(self: *Toplevel, size: windowing.Size) void {
+            self.toplevel.setMinSize(@intCast(size.width), @intCast(size.height));
+        }
+
+        pub fn setMaxSize(self: *Toplevel, size: windowing.Size) void {
+            self.toplevel.setMaxSize(@intCast(size.width), @intCast(size.height));
+        }
+
+        pub fn setMaximized(self: *Toplevel, maximized: bool) void {
+            if (maximized) self.toplevel.setMaximized() else self.toplevel.unsetMaximized();
+        }
+
+        /// There is no unminimize request in core xdg-shell; the compositor
+        /// decides how a minimized window is restored.
+        pub fn setMinimized(self: *Toplevel, minimized: bool) void {
+            if (minimized) self.toplevel.setMinimized();
+        }
+
+        pub fn setFullscreen(self: *Toplevel, fullscreen: bool) void {
+            if (fullscreen) self.toplevel.setFullscreen(null) else self.toplevel.unsetFullscreen();
+        }
+
+        pub fn setParent(self: *Toplevel, parent: ?*Toplevel) void {
+            self.toplevel.setParent(if (parent) |p| p.toplevel else null);
+        }
+    };
+
+    /// Popups are tooltips, menus and other transient surfaces.
+    pub const Popup = struct {
+        xdg_surface: *xdg.Surface,
+        popup: *xdg.Popup,
+        /// Top-left corner relative to the parent client area.
+        offset: windowing.Offset = .{ .x = 0, .y = 0 },
+        /// The compositor moved the popup since the last drain.
+        offset_dirty: bool = false,
+        /// A configure arrived since the last drain.
+        configure_seen: bool = false,
+        /// The compositor dismissed the popup.
+        done: bool = false,
+        /// The last positioner applied to the popup, so an update can change
+        /// just the anchor rectangle.
+        positioner: windowing.Positioner = std.mem.zeroes(windowing.Positioner),
+        /// Token for the next `xdg_popup.reposition`.
+        reposition_token: u32 = 0,
+
+        pub fn offsetFromParent(self: *const Popup) windowing.Offset {
+            return self.offset;
+        }
+
+        /// Ask the compositor to reposition the popup. The new geometry arrives
+        /// in the following `configure` event.
+        pub fn reposition(self: *Popup, positioner: *xdg.Positioner) void {
+            self.popup.reposition(positioner, self.reposition_token);
+            self.reposition_token +%= 1;
+        }
+    };
+
+    /// Layer surfaces are the wlr-layer-shell role (a bar, wallpaper, overlay,
+    /// …). They are composited with premultiplied alpha, so panels and overlays
+    /// can have transparent regions.
+    pub const Layer = struct {
+        layer_surface: *zwlr.LayerSurfaceV1,
+        /// The layer-surface properties last applied. The namespace pointer is
+        /// not retained; only the double-buffered state is.
+        state: windowing.LayerSurface = std.mem.zeroes(windowing.LayerSurface),
+    };
+
+    /// Install a window on freshly created Wayland proxies. For a layer
+    /// surface the initial state and size are queued before the first commit,
+    /// which is the commit the compositor answers with its first configure.
     pub fn create(
         allocator: std.mem.Allocator,
         surface: *wl.Surface,
-        xdg_surface: *xdg.Surface,
-        toplevel: *xdg.Toplevel,
+        role: Role,
+        size: windowing.Size,
     ) !*Window {
         const self = try allocator.create(Window);
-        self.* = .{
-            .surface = surface,
-            .xdg_surface = xdg_surface,
-            .role = .{ .toplevel = toplevel },
-        };
-        xdg_surface.setListener(*Window, xdgSurfaceListener, self);
-        toplevel.setListener(*Window, toplevelListener, self);
-        surface.setListener(*Window, surfaceListener, self);
-        surface.commit();
-        return self;
-    }
-
-    /// Install a popup window on freshly created surface/xdg/popup proxies.
-    pub fn createPopup(
-        allocator: std.mem.Allocator,
-        surface: *wl.Surface,
-        xdg_surface: *xdg.Surface,
-        popup: *xdg.Popup,
-    ) !*Window {
-        const self = try allocator.create(Window);
-        self.* = .{
-            .surface = surface,
-            .xdg_surface = xdg_surface,
-            .role = .{ .popup = popup },
-        };
-        xdg_surface.setListener(*Window, xdgSurfaceListener, self);
-        popup.setListener(*Window, popupListener, self);
-        surface.setListener(*Window, surfaceListener, self);
-        surface.commit();
-        return self;
-    }
-
-    /// Install a layer window on a freshly created surface and layer-surface
-    /// proxy. The initial state and size are queued before the first commit,
-    /// which is the commit the compositor answers with its first configure.
-    pub fn createLayer(
-        allocator: std.mem.Allocator,
-        surface: *wl.Surface,
-        layer_surface: *zwlr.LayerSurfaceV1,
-        state: windowing.LayerSurface,
-        width: u32,
-        height: u32,
-    ) !*Window {
-        const self = try allocator.create(Window);
-        self.* = .{
-            .surface = surface,
-            .role = .{ .layer = layer_surface },
-            .width = width,
-            .height = height,
-            .transparent = true,
-        };
         errdefer allocator.destroy(self);
-        layer_surface.setListener(*Window, layerSurfaceListener, self);
+        self.* = .{
+            .surface = surface,
+            .role = role,
+            .width = size.width,
+            .height = size.height,
+        };
+
+        switch (self.role) {
+            .toplevel => |toplevel| {
+                toplevel.xdg_surface.setListener(*Window, xdgSurfaceListener, self);
+                toplevel.toplevel.setListener(*Window, toplevelListener, self);
+            },
+            .popup => |popup| {
+                popup.xdg_surface.setListener(*Window, xdgSurfaceListener, self);
+                popup.popup.setListener(*Window, popupListener, self);
+            },
+            .layer => |layer| {
+                layer.layer_surface.setListener(*Window, layerSurfaceListener, self);
+                try self.writeLayerSurface(layer.state);
+                layer.layer_surface.setSize(size.width, size.height);
+            },
+        }
         surface.setListener(*Window, surfaceListener, self);
-        try self.writeLayerSurface(state);
-        layer_surface.setSize(width, height);
         surface.commit();
         return self;
     }
 
     pub fn destroy(self: *Window, allocator: std.mem.Allocator) void {
         switch (self.role) {
-            .toplevel => |toplevel| toplevel.destroy(),
-            .popup => |popup| popup.destroy(),
-            .layer => |layer| layer.destroy(),
+            .toplevel => |toplevel| {
+                toplevel.toplevel.destroy();
+                toplevel.xdg_surface.destroy();
+            },
+            .popup => |popup| {
+                popup.popup.destroy();
+                popup.xdg_surface.destroy();
+            },
+            .layer => |layer| layer.layer_surface.destroy(),
         }
-        if (self.xdg_surface) |xdg_surface| xdg_surface.destroy();
         self.surface.destroy();
         allocator.destroy(self);
     }
 
-    pub fn isPopup(self: *const Window) bool {
-        return switch (self.role) {
-            .popup => true,
-            .toplevel, .layer => false,
-        };
-    }
-
-    pub fn isLayer(self: *const Window) bool {
-        return switch (self.role) {
-            .layer => true,
-            .toplevel, .popup => false,
-        };
-    }
-
-    pub fn layerRole(self: *Window) ?*zwlr.LayerSurfaceV1 {
-        return switch (self.role) {
-            .layer => |layer| layer,
-            .toplevel, .popup => null,
-        };
-    }
-
-    /// Queue a new layer-surface state and apply it with the next commit.
+    /// Queue a new layer-surface state and apply it with the next commit. The
+    /// caller must have checked the window's role.
     pub fn applyLayerSurface(self: *Window, state: windowing.LayerSurface) !void {
         try self.writeLayerSurface(state);
         self.commit();
     }
 
     fn writeLayerSurface(self: *Window, state: windowing.LayerSurface) !void {
-        const layer_surface = self.layerRole() orelse return error.NotALayerSurface;
+        std.debug.assert(self.role == .layer);
+        const layer = &self.role.layer;
         if (!layerSizeValid(state.anchor, self.width, self.height)) return error.InvalidSize;
 
         // `get_layer_surface` already assigned the layer at creation. The
         // request only exists from version 2 on.
-        const layer = layerFromInt(state.layer) orelse return error.InvalidLayer;
-        if (layer_surface.getVersion() >= 2) layer_surface.setLayer(layer);
+        const shell_layer = layerFromInt(state.layer) orelse return error.InvalidLayer;
+        if (layer.layer_surface.getVersion() >= 2) layer.layer_surface.setLayer(shell_layer);
 
-        layer_surface.setAnchor(layerAnchor(state.anchor));
-        layer_surface.setExclusiveZone(state.exclusive_zone);
-        layer_surface.setMargin(
+        layer.layer_surface.setAnchor(layerAnchor(state.anchor));
+        layer.layer_surface.setExclusiveZone(state.exclusive_zone);
+        layer.layer_surface.setMargin(
             state.margin_top,
             state.margin_right,
             state.margin_bottom,
@@ -242,13 +257,13 @@ pub const Window = struct {
         const interactivity = keyboardInteractivityFromInt(state.keyboard_interactivity) orelse
             return error.InvalidKeyboardInteractivity;
         // `on_demand` was added in version 4.
-        if (interactivity == .on_demand and layer_surface.getVersion() < 4) {
+        if (interactivity == .on_demand and layer.layer_surface.getVersion() < 4) {
             return error.UnsupportedKeyboardInteractivity;
         }
-        layer_surface.setKeyboardInteractivity(interactivity);
+        layer.layer_surface.setKeyboardInteractivity(interactivity);
 
-        self.layer_state = state;
-        self.layer_state.namespace = null;
+        layer.state = state;
+        layer.state.namespace = null;
     }
 
     /// Change the layer surface's requested size. The compositor may ignore it
@@ -257,12 +272,12 @@ pub const Window = struct {
     /// A zero request for a stretched axis is not a zero surface size: the
     /// compositor keeps choosing it, so the cached size stays at the last
     /// configured value.
-    pub fn setSize(self: *Window, size: windowing.Size) void {
-        const layer_surface = self.layerRole() orelse return;
-        const anchors = self.layer_state.anchor;
+    pub fn requestLayerSize(self: *Window, size: windowing.Size) void {
+        const layer = &self.role.layer;
+        const anchors = layer.state.anchor;
         if (!stretchesWidth(anchors)) self.width = size.width;
         if (!stretchesHeight(anchors)) self.height = size.height;
-        layer_surface.setSize(size.width, size.height);
+        layer.layer_surface.setSize(size.width, size.height);
         self.resized = true;
         self.commit();
     }
@@ -277,14 +292,16 @@ pub const Window = struct {
 
         // A layer request carries the authoritative anchors, even when the
         // surface itself has not been reconfigured yet (hot restart).
-        const anchors = if (self.isLayer()) req.layer_surface.anchor else 0;
+        const anchors = switch (self.role) {
+            .layer => req.layer_surface.anchor,
+            .toplevel, .popup => 0,
+        };
         var axes: u8 = 0;
         if (sized) {
             if (!stretchesWidth(anchors)) axes |= content_axis_width;
             if (!stretchesHeight(anchors)) axes |= content_axis_height;
         }
         self.content_axes.store(axes, .release);
-        self.track_content_size.store(axes != 0, .release);
         self.setContentConstraints(req.min_size, req.max_size);
     }
 
@@ -293,7 +310,6 @@ pub const Window = struct {
     /// when the caller explicitly requests a size.
     pub fn stopSizingToContent(self: *Window) void {
         self.content_axes.store(0, .release);
-        self.track_content_size.store(false, .release);
     }
 
     /// Update the limits used for engine metrics. A zero maximum means
@@ -315,10 +331,6 @@ pub const Window = struct {
 
     pub fn tracksContentHeight(self: *const Window) bool {
         return self.content_axes.load(.acquire) & content_axis_height != 0;
-    }
-
-    pub fn isTrackingContentSize(self: *const Window) bool {
-        return self.track_content_size.load(.acquire);
     }
 
     /// Use `ratio` as the buffer scale. `wl_surface.set_buffer_scale` is
@@ -395,23 +407,28 @@ pub const Window = struct {
         if (axes & content_axis_width != 0) self.width = width;
         if (axes & content_axis_height != 0) self.height = height;
 
-        if (self.layerRole()) |layer_surface| {
-            // A stretched axis is owned by the compositor: request zero so it
-            // keeps choosing that dimension.
-            const anchors = self.layer_state.anchor;
-            layer_surface.setSize(
-                if (stretchesWidth(anchors)) 0 else self.width,
-                if (stretchesHeight(anchors)) 0 else self.height,
-            );
-            self.commit();
-            self.resized = true;
-            return;
-        }
-        if (!self.resizable) {
-            const fixed = windowing.Size{ .width = self.width, .height = self.height };
-            self.setMinSize(fixed);
-            self.setMaxSize(fixed);
-            self.commit();
+        switch (self.role) {
+            .layer => |*layer| {
+                // A stretched axis is owned by the compositor: request zero so
+                // it keeps choosing that dimension.
+                const anchors = layer.state.anchor;
+                layer.layer_surface.setSize(
+                    if (stretchesWidth(anchors)) 0 else self.width,
+                    if (stretchesHeight(anchors)) 0 else self.height,
+                );
+                self.commit();
+                self.resized = true;
+                return;
+            },
+            .toplevel => |*toplevel| {
+                if (!self.resizable) {
+                    const fixed = windowing.Size{ .width = self.width, .height = self.height };
+                    toplevel.setMinSize(fixed);
+                    toplevel.setMaxSize(fixed);
+                    self.commit();
+                }
+            },
+            .popup => {},
         }
         self.resized = true;
     }
@@ -423,8 +440,13 @@ pub const Window = struct {
         self.width = size.width;
         self.height = size.height;
         if (!self.resizable) {
-            self.setMinSize(size);
-            self.setMaxSize(size);
+            switch (self.role) {
+                .toplevel => |*toplevel| {
+                    toplevel.setMinSize(size);
+                    toplevel.setMaxSize(size);
+                },
+                .popup, .layer => {},
+            }
             self.commit();
         }
         self.resized = true;
@@ -450,67 +472,6 @@ pub const Window = struct {
     fn boundedMax(value: u32, min: u32) u32 {
         if (value == 0) return max_content_size;
         return @max(min, @min(value, max_content_size));
-    }
-
-    fn toplevelRole(self: *Window) ?*xdg.Toplevel {
-        return switch (self.role) {
-            .toplevel => |toplevel| toplevel,
-            .popup, .layer => null,
-        };
-    }
-
-    /// Queue the xdg_toplevel requests below. They are double-buffered, so the
-    /// caller commits the surface (`commit`) once after a batch. They are
-    /// no-ops for a popup, which has no such requests.
-    pub fn setTitle(self: *Window, title: [*:0]const u8) void {
-        if (self.toplevelRole()) |toplevel| toplevel.setTitle(title);
-    }
-
-    pub fn setMinSize(self: *Window, size: windowing.Size) void {
-        if (self.toplevelRole()) |toplevel| {
-            toplevel.setMinSize(@intCast(size.width), @intCast(size.height));
-        }
-    }
-
-    pub fn setMaxSize(self: *Window, size: windowing.Size) void {
-        if (self.toplevelRole()) |toplevel| {
-            toplevel.setMaxSize(@intCast(size.width), @intCast(size.height));
-        }
-    }
-
-    pub fn setMaximized(self: *Window, maximized: bool) void {
-        const toplevel = self.toplevelRole() orelse return;
-        if (maximized) toplevel.setMaximized() else toplevel.unsetMaximized();
-    }
-
-    /// There is no unminimize request in core xdg-shell; the compositor decides
-    /// how a minimized window is restored.
-    pub fn setMinimized(self: *Window, minimized: bool) void {
-        if (self.toplevelRole()) |toplevel| {
-            if (minimized) toplevel.setMinimized();
-        }
-    }
-
-    pub fn setFullscreen(self: *Window, fullscreen: bool) void {
-        const toplevel = self.toplevelRole() orelse return;
-        if (fullscreen) toplevel.setFullscreen(null) else toplevel.unsetFullscreen();
-    }
-
-    pub fn setParent(self: *Window, parent: ?*Window) void {
-        const toplevel = self.toplevelRole() orelse return;
-        toplevel.setParent(if (parent) |p| p.toplevelRole() else null);
-    }
-
-    /// Ask the compositor to reposition a popup. The new geometry arrives in
-    /// the following `configure` event.
-    pub fn reposition(self: *Window, positioner: *xdg.Positioner) void {
-        switch (self.role) {
-            .popup => |popup| {
-                popup.reposition(positioner, self.reposition_token);
-                self.reposition_token +%= 1;
-            },
-            .toplevel, .layer => {},
-        }
     }
 
     /// Apply the queued xdg requests.
@@ -573,12 +534,13 @@ pub const Window = struct {
     }
 
     fn toplevelListener(_: *xdg.Toplevel, event: xdg.Toplevel.Event, self: *Window) void {
+        const toplevel = &self.role.toplevel;
         switch (event) {
             .configure => |configure| {
                 const bits = stateBits(configure.states);
-                if (bits != self.state_bits) {
-                    self.state_bits = bits;
-                    self.state_dirty = true;
+                if (bits != toplevel.state_bits) {
+                    toplevel.state_bits = bits;
+                    toplevel.state_dirty = true;
                 }
 
                 // An unchanged size needs nothing: the engine was told the same
@@ -594,9 +556,9 @@ pub const Window = struct {
             .close => self.closing = true,
             .wm_capabilities => |caps| {
                 const bits = capabilityBits(caps.capabilities);
-                if (bits != self.wm_capabilities) {
-                    self.wm_capabilities = bits;
-                    self.capabilities_dirty = true;
+                if (bits != toplevel.wm_capabilities) {
+                    toplevel.wm_capabilities = bits;
+                    toplevel.capabilities_dirty = true;
                 }
             },
             else => {},
@@ -604,11 +566,12 @@ pub const Window = struct {
     }
 
     fn popupListener(_: *xdg.Popup, event: xdg.Popup.Event, self: *Window) void {
+        const popup = &self.role.popup;
         switch (event) {
             .configure => |configure| {
-                self.popup_configured = true;
-                self.offset_from_parent = .{ .x = configure.x, .y = configure.y };
-                self.offset_dirty = true;
+                popup.configure_seen = true;
+                popup.offset = .{ .x = configure.x, .y = configure.y };
+                popup.offset_dirty = true;
 
                 const size = configuredSize(configure.width, configure.height) orelse return;
                 if (size[0] == self.width and size[1] == self.height) return;
@@ -619,7 +582,7 @@ pub const Window = struct {
             },
             // The compositor dismissed the popup; the client should destroy it.
             .popup_done => {
-                self.popup_done = true;
+                popup.done = true;
             },
             // The following `configure` carries the new geometry.
             .repositioned => {},
@@ -634,10 +597,10 @@ pub const Window = struct {
         event: zwlr.LayerSurfaceV1.Event,
         self: *Window,
     ) void {
+        const layer = &self.role.layer;
         switch (event) {
             .configure => |configure| {
-                const layer_surface = self.layerRole() orelse return;
-                layer_surface.ackConfigure(configure.serial);
+                layer.layer_surface.ackConfigure(configure.serial);
 
                 var changed = false;
                 if (configure.width != 0 and configure.width != self.width) {
@@ -653,7 +616,7 @@ pub const Window = struct {
                     // match before the buffer for it can be attached. A zero
                     // dimension means the compositor left that axis to us, so
                     // repeat our current value.
-                    layer_surface.setSize(self.width, self.height);
+                    layer.layer_surface.setSize(self.width, self.height);
                     self.resized = true;
                 }
 
@@ -774,6 +737,22 @@ pub fn layerSizeValid(anchor: u32, width: u32, height: u32) bool {
         (height != 0 or stretchesHeight(anchor));
 }
 
+test "role state queries read the owning variant" {
+    const testing = std.testing;
+
+    var toplevel: Window.Toplevel = .{ .xdg_surface = undefined, .toplevel = undefined };
+    toplevel.state_bits = windowing.ToplevelState.activated;
+    toplevel.wm_capabilities = windowing.WmCapabilities.maximize;
+    try testing.expectEqual(windowing.ToplevelState.activated, toplevel.toplevelState());
+    try testing.expectEqual(windowing.WmCapabilities.maximize, toplevel.wmCapabilities());
+
+    var popup: Window.Popup = .{ .xdg_surface = undefined, .popup = undefined };
+    popup.offset = .{ .x = 12, .y = -3 };
+    const offset = popup.offsetFromParent();
+    try testing.expectEqual(@as(i32, 12), offset.x);
+    try testing.expectEqual(@as(i32, -3), offset.y);
+}
+
 test "content-sized metrics stay loose per content axis" {
     const testing = std.testing;
 
@@ -814,39 +793,36 @@ test "content sizing only tracks layer axes the compositor does not own" {
     req.sized_to_content = 1;
     req.layer_surface.anchor = windowing.LayerAnchor.left | windowing.LayerAnchor.right;
 
-    win.role = .{ .layer = undefined };
+    win.role = .{ .layer = .{ .layer_surface = undefined } };
     win.applyRequest(&req);
     try testing.expect(!win.tracksContentWidth());
     try testing.expect(win.tracksContentHeight());
-    try testing.expect(win.isTrackingContentSize());
+    try testing.expect(win.isSizedToContent());
 
     // A toplevel has no layer anchors, so it tracks both axes.
-    win.role = .{ .toplevel = undefined };
+    win.role = .{ .toplevel = .{ .xdg_surface = undefined, .toplevel = undefined } };
     win.applyRequest(&req);
     try testing.expect(win.tracksContentWidth());
     try testing.expect(win.tracksContentHeight());
 
     // Both axes stretched: nothing is content-sized.
-    win.role = .{ .layer = undefined };
+    win.role = .{ .layer = .{ .layer_surface = undefined } };
     req.layer_surface.anchor = windowing.LayerAnchor.top |
         windowing.LayerAnchor.bottom |
         windowing.LayerAnchor.left |
         windowing.LayerAnchor.right;
     win.applyRequest(&req);
     try testing.expect(!win.isSizedToContent());
-    try testing.expect(!win.isTrackingContentSize());
 }
 
-test "stopping content sizing clears both axes" {
+test "stopping content sizing clears the axes" {
     const testing = std.testing;
 
     var win: Window = undefined;
     win.content_axes = std.atomic.Value(u8).init(content_axis_width | content_axis_height);
-    win.track_content_size = std.atomic.Value(bool).init(true);
 
     win.stopSizingToContent();
     try testing.expect(!win.isSizedToContent());
-    try testing.expect(!win.isTrackingContentSize());
 }
 
 test "an explicit size leaves content sizing" {
@@ -854,7 +830,6 @@ test "an explicit size leaves content sizing" {
 
     var win: Window = undefined;
     win.content_axes = std.atomic.Value(u8).init(content_axis_width | content_axis_height);
-    win.track_content_size = std.atomic.Value(bool).init(true);
     win.resizable = true;
 
     win.applyRequestedSize(.{ .width = 500, .height = 300 });

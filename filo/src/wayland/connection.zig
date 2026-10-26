@@ -200,7 +200,15 @@ pub const Connection = struct {
         const toplevel = try xdg_surface.getToplevel();
         errdefer toplevel.destroy();
 
-        return window.Window.create(self.allocator, surface, xdg_surface, toplevel);
+        return window.Window.create(
+            self.allocator,
+            surface,
+            .{ .toplevel = .{
+                .xdg_surface = xdg_surface,
+                .toplevel = toplevel,
+            } },
+            window.default_size,
+        );
     }
 
     /// Everything a layer window needs beyond the surface itself.
@@ -244,13 +252,14 @@ pub const Connection = struct {
         // region (the default) means the whole surface accepts input.
         try self.setSurfaceInputRegion(surface, options.state.accepts_input != 0);
 
-        return window.Window.createLayer(
+        return window.Window.create(
             self.allocator,
             surface,
-            layer_surface,
-            options.state,
-            options.width,
-            options.height,
+            .{ .layer = .{
+                .layer_surface = layer_surface,
+                .state = options.state,
+            } },
+            .{ .width = options.width, .height = options.height },
         );
     }
 
@@ -278,14 +287,19 @@ pub const Connection = struct {
         errdefer surface.destroy();
         const xdg_surface = try self.wm_base.getXdgSurface(surface);
         errdefer xdg_surface.destroy();
-        const popup = try xdg_surface.getPopup(parent.xdg_surface, positioner);
+        const parent_xdg_surface: ?*xdg.Surface = switch (parent.role) {
+            .toplevel => |toplevel| toplevel.xdg_surface,
+            .popup => |popup| popup.xdg_surface,
+            .layer => null,
+        };
+        const popup = try xdg_surface.getPopup(parent_xdg_surface, positioner);
         errdefer popup.destroy();
 
         // A layer surface is not an xdg_surface, so its popups are attached
         // through zwlr_layer_surface_v1.get_popup instead.
-        if (parent.xdg_surface == null) {
-            const layer_surface = parent.layerRole() orelse return error.InvalidParent;
-            layer_surface.getPopup(popup);
+        switch (parent.role) {
+            .layer => |layer| layer.layer_surface.getPopup(popup),
+            .toplevel, .popup => {},
         }
 
         // A grab is what lets the compositor dismiss the popup on an outside
@@ -294,7 +308,15 @@ pub const Connection = struct {
             if (self.last_serial) |serial| popup.grab(seat, serial);
         }
 
-        return window.Window.createPopup(self.allocator, surface, xdg_surface, popup);
+        return window.Window.create(
+            self.allocator,
+            surface,
+            .{ .popup = .{
+                .xdg_surface = xdg_surface,
+                .popup = popup,
+            } },
+            window.default_size,
+        );
     }
 
     /// Block until the compositor has sent the initial configure and the

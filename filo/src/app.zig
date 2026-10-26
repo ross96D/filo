@@ -123,23 +123,33 @@ pub const View = struct {
                 }
             }
         }
-        if (self.win.popup_configured) {
-            self.win.popup_configured = false;
-            self.content_resize_pending.store(false, .release);
-        }
-        if (self.win.state_dirty) {
-            self.win.state_dirty = false;
-            if (self.callbacks.on_state) |on_state| on_state(self.win.state_bits);
-        }
-        if (self.win.capabilities_dirty) {
-            self.win.capabilities_dirty = false;
-            if (self.callbacks.on_capabilities) |on_capabilities| on_capabilities(self.win.wm_capabilities);
-        }
-        if (self.win.offset_dirty) {
-            self.win.offset_dirty = false;
-            if (self.callbacks.on_moved) |on_moved| {
-                on_moved(self.win.offset_from_parent.x, self.win.offset_from_parent.y);
-            }
+        switch (self.win.role) {
+            .toplevel => |*toplevel| {
+                if (toplevel.state_dirty) {
+                    toplevel.state_dirty = false;
+                    if (self.callbacks.on_state) |on_state| on_state(toplevel.toplevelState());
+                }
+                if (toplevel.capabilities_dirty) {
+                    toplevel.capabilities_dirty = false;
+                    if (self.callbacks.on_capabilities) |on_capabilities| {
+                        on_capabilities(toplevel.wmCapabilities());
+                    }
+                }
+            },
+            .popup => |*popup| {
+                if (popup.configure_seen) {
+                    popup.configure_seen = false;
+                    self.content_resize_pending.store(false, .release);
+                }
+                if (popup.offset_dirty) {
+                    popup.offset_dirty = false;
+                    if (self.callbacks.on_moved) |on_moved| {
+                        const offset = popup.offsetFromParent();
+                        on_moved(offset.x, offset.y);
+                    }
+                }
+            },
+            .layer => {},
         }
     }
 };
@@ -199,13 +209,17 @@ pub const App = struct {
     /// surface with the shared frame clock. The window is owned by the view on
     /// success and by the caller on failure.
     pub fn adoptView(self: *App, id: engine.ViewId, win: *window.Window) !*View {
+        const transparent = switch (win.role) {
+            .layer => true,
+            .toplevel, .popup => false,
+        };
         var surface = try vulkan.Surface.create(
             self.vk,
             @ptrCast(self.ctx.conn.display),
             @ptrCast(win.surface),
             win.physicalWidth(),
             win.physicalHeight(),
-            win.transparent,
+            transparent,
         );
         errdefer surface.destroy();
         surface.requestBufferScale(win.bufferScale());
@@ -262,10 +276,11 @@ pub const App = struct {
         // role), create one lazily and never AddView it.
         if (req.preferred_view_id == 0 and !self.implicit_adopted) {
             if (self.viewForId(0)) |view| {
-                // A layer-role surface cannot become an xdg_toplevel. Leave it
-                // for a layer request and create a new view instead.
-                if (!view.win.isLayer()) {
-                    return self.adoptToplevelView(view, req);
+                // Only a toplevel can be adopted as the implicit toplevel. A
+                // layer or popup implicit surface stays as it is.
+                switch (view.win.role) {
+                    .toplevel => return self.adoptToplevelView(view, req),
+                    .popup, .layer => {},
                 }
             } else {
                 const initial_width = @max(1, @min(req.min_size.width, max_content_size));
@@ -314,31 +329,35 @@ pub const App = struct {
         const view = try self.createView(width, height);
         errdefer self.destroyView(view);
         view.win.applyRequest(req);
+        const toplevel = &view.win.role.toplevel;
 
         if (req.parent_view_id >= 0) {
             const parent = self.viewForId(req.parent_view_id) orelse return error.UnknownParent;
-            view.win.setParent(parent.win);
+            switch (parent.win.role) {
+                .toplevel => |*parent_toplevel| toplevel.setParent(parent_toplevel),
+                .popup, .layer => toplevel.setParent(null),
+            }
         }
 
-        if (req.title) |title| view.win.setTitle(title);
+        if (req.title) |title| toplevel.setTitle(title);
         view.setViewTitleZ(req.title);
 
         if (sized_to_content) {
             // Until the first frame arrives, only the requested constraints
             // apply. A non-resizable sized-to-content window is pinned to its
             // content size once that size is known.
-            view.win.setMinSize(req.min_size);
-            view.win.setMaxSize(req.max_size);
+            toplevel.setMinSize(req.min_size);
+            toplevel.setMaxSize(req.max_size);
         } else if (req.resizable == 0) {
             const fixed = if (req.size.width > 0 and req.size.height > 0)
                 windowing.Size{ .width = req.size.width, .height = req.size.height }
             else
                 windowing.Size{ .width = view.win.width, .height = view.win.height };
-            view.win.setMinSize(fixed);
-            view.win.setMaxSize(fixed);
+            toplevel.setMinSize(fixed);
+            toplevel.setMaxSize(fixed);
         } else {
-            view.win.setMinSize(req.min_size);
-            view.win.setMaxSize(req.max_size);
+            toplevel.setMinSize(req.min_size);
+            toplevel.setMaxSize(req.max_size);
         }
         // The xdg_toplevel requests above are double-buffered.
         view.win.commit();
@@ -346,8 +365,8 @@ pub const App = struct {
         // The initial state is returned in the handle; do not replay it as
         // events once the caller registers its callbacks.
         view.win.resized = false;
-        view.win.state_dirty = false;
-        view.win.capabilities_dirty = false;
+        toplevel.state_dirty = false;
+        toplevel.capabilities_dirty = false;
         return view;
     }
 
@@ -358,6 +377,7 @@ pub const App = struct {
         view.added = true;
 
         view.win.applyRequest(req);
+        const toplevel = &view.win.role.toplevel;
         // The view may have survived a hot restart. Re-apply the first
         // content-sized frame so sizing state (pinning or the resizable
         // one-shot) is established again.
@@ -368,31 +388,31 @@ pub const App = struct {
         self.notifyAdoptedView(view);
 
         if (req.title) |title| {
-            view.win.setTitle(title);
+            toplevel.setTitle(title);
             view.setViewTitleZ(req.title);
         }
         if (req.sized_to_content != 0) {
             // The content size is not known yet. Keep the requested bounds
             // until the first frame pins a non-resizable window to its content
             // size (see `runContentResize`).
-            view.win.setMinSize(req.min_size);
-            view.win.setMaxSize(req.max_size);
+            toplevel.setMinSize(req.min_size);
+            toplevel.setMaxSize(req.max_size);
         } else if (req.resizable == 0) {
             const fixed = if (req.size.width > 0 and req.size.height > 0)
                 windowing.Size{ .width = req.size.width, .height = req.size.height }
             else
                 windowing.Size{ .width = view.win.width, .height = view.win.height };
-            view.win.setMinSize(fixed);
-            view.win.setMaxSize(fixed);
+            toplevel.setMinSize(fixed);
+            toplevel.setMaxSize(fixed);
         } else {
-            view.win.setMinSize(req.min_size);
-            view.win.setMaxSize(req.max_size);
+            toplevel.setMinSize(req.min_size);
+            toplevel.setMaxSize(req.max_size);
         }
         view.win.commit();
 
         view.win.resized = false;
-        view.win.state_dirty = false;
-        view.win.capabilities_dirty = false;
+        toplevel.state_dirty = false;
+        toplevel.capabilities_dirty = false;
         return view;
     }
 
@@ -437,9 +457,9 @@ pub const App = struct {
         errdefer self.destroyView(view);
         view.win.applyRequest(req);
 
-        view.win.positioner = positioner;
+        view.win.role.popup.positioner = positioner;
         view.win.resized = false;
-        view.win.offset_dirty = false;
+        view.win.role.popup.offset_dirty = false;
         return view;
     }
 
@@ -471,8 +491,9 @@ pub const App = struct {
             if (self.viewForId(0)) |view| {
                 // Re-adopt after a hot restart. A toplevel cannot become a
                 // layer surface, so a role mismatch falls through to a new view.
-                if (view.win.isLayer()) {
-                    return self.readoptLayerView(view, req);
+                switch (view.win.role) {
+                    .layer => return self.readoptLayerView(view, req),
+                    .toplevel, .popup => {},
                 }
             } else {
                 const win = try self.createLayerWindow(req);
@@ -546,7 +567,7 @@ pub const App = struct {
 
         const state = req.layer_surface;
         const size = layerRequestSize(req);
-        const current = view.win.layer_state;
+        const current = view.win.role.layer.state;
 
         // Always refresh the sizing state: the new isolate may carry different
         // constraints. Then decide whether the surface itself has to change.
@@ -580,7 +601,7 @@ pub const App = struct {
             // Apply the size first so the layer-state validation sees the new
             // dimensions, then the state. Both are double-buffered and commit.
             view.win.configured = false;
-            view.win.setSize(target);
+            view.win.requestLayerSize(target);
             try view.win.applyLayerSurface(state);
         }
 
@@ -782,17 +803,21 @@ pub const App = struct {
         // it when the content actually differs. A toplevel always applies its
         // first frame, even when it matches the placeholder, so a non-resizable
         // window gets pinned and a resizable one ends its initial auto-size.
-        const force_first = first_content_frame and !view.win.isPopup();
+        const popup_role = switch (view.win.role) {
+            .popup => true,
+            .toplevel, .layer => false,
+        };
+        const force_first = first_content_frame and !popup_role;
         const content_changed =
             (view.win.tracksContentWidth() and width != view.contentWidth()) or
             (view.win.tracksContentHeight() and height != view.contentHeight());
         if (scale_transition == 0 and
-            view.win.isTrackingContentSize() and
+            view.win.isSizedToContent() and
             (force_first or content_changed))
         {
             view.content_frame_seen.store(true, .release);
             self.postContentResize(view, width, height);
-            if (view.win.isPopup()) return true;
+            if (popup_role) return true;
         }
 
         view.surface.presentLayers(width, height, layers[0..count]) catch |err| {
@@ -892,9 +917,18 @@ pub const App = struct {
             .height = view.win.height,
         };
         out.title = if (kind == .toplevel) view.viewTitleZ() else null;
-        out.toplevel_state = view.win.state_bits;
-        out.wm_capabilities = view.win.wm_capabilities;
-        out.offset_from_parent = view.win.offset_from_parent;
+        out.toplevel_state = switch (view.win.role) {
+            .toplevel => |toplevel| toplevel.toplevelState(),
+            .popup, .layer => 0,
+        };
+        out.wm_capabilities = switch (view.win.role) {
+            .toplevel => |toplevel| toplevel.wmCapabilities(),
+            .popup, .layer => 0,
+        };
+        out.offset_from_parent = switch (view.win.role) {
+            .popup => |popup| popup.offsetFromParent(),
+            .toplevel, .layer => .{ .x = 0, .y = 0 },
+        };
         return .ok;
     }
 
@@ -924,7 +958,12 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        if (title) |value| view.win.setTitle(value);
+        if (title) |value| {
+            switch (view.win.role) {
+                .toplevel => |*toplevel| toplevel.setTitle(value),
+                .popup, .layer => {},
+            }
+        }
         view.setViewTitleZ(title);
         view.win.commit();
         return .ok;
@@ -940,16 +979,20 @@ pub const App = struct {
         // A layer surface's size is a client request. For the xdg-shell roles
         // there is no resize request, but an explicit setSize still leaves
         // content-sizing mode and asks the engine to draw at that size.
-        if (view.win.isLayer()) {
-            if (!window.layerSizeValid(view.win.layer_state.anchor, size.width, size.height)) {
-                return .invalid_argument;
-            }
-            view.win.stopSizingToContent();
-            view.win.setSize(size);
-            return .ok;
+        switch (view.win.role) {
+            .layer => |layer| {
+                if (!window.layerSizeValid(layer.state.anchor, size.width, size.height)) {
+                    return .invalid_argument;
+                }
+                view.win.stopSizingToContent();
+                view.win.requestLayerSize(size);
+                return .ok;
+            },
+            .toplevel, .popup => {
+                view.win.applyRequestedSize(size);
+                return .ok;
+            },
         }
-        view.win.applyRequestedSize(size);
-        return .ok;
     }
 
     fn bridgeSetConstraints(
@@ -961,8 +1004,13 @@ pub const App = struct {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
         view.win.setContentConstraints(min, max);
-        view.win.setMinSize(min);
-        view.win.setMaxSize(max);
+        switch (view.win.role) {
+            .toplevel => |*toplevel| {
+                toplevel.setMinSize(min);
+                toplevel.setMaxSize(max);
+            },
+            .popup, .layer => {},
+        }
 
         if (view.win.isSizedToContent()) {
             // The new bounds replace the ones used for loose metrics. Unpin
@@ -970,10 +1018,9 @@ pub const App = struct {
             // valid, and schedule a relayout so the content can pick a new
             // size.
             view.win.clampToContentConstraints();
-            if (view.win.isLayer()) {
-                view.win.applyContentSize(view.win.width, view.win.height);
-            } else {
-                view.win.resized = true;
+            switch (view.win.role) {
+                .layer => view.win.applyContentSize(view.win.width, view.win.height),
+                .toplevel, .popup => view.win.resized = true,
             }
         }
         view.win.commit();
@@ -994,7 +1041,10 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        view.win.setMaximized(maximized);
+        switch (view.win.role) {
+            .toplevel => |*toplevel| toplevel.setMaximized(maximized),
+            .popup, .layer => {},
+        }
         view.win.commit();
         return .ok;
     }
@@ -1006,7 +1056,10 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        view.win.setMinimized(minimized);
+        switch (view.win.role) {
+            .toplevel => |*toplevel| toplevel.setMinimized(minimized),
+            .popup, .layer => {},
+        }
         view.win.commit();
         return .ok;
     }
@@ -1018,7 +1071,10 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        view.win.setFullscreen(fullscreen);
+        switch (view.win.role) {
+            .toplevel => |*toplevel| toplevel.setFullscreen(fullscreen),
+            .popup, .layer => {},
+        }
         view.win.commit();
         return .ok;
     }
@@ -1030,11 +1086,18 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        if (parent_view_id < 0) {
-            view.win.setParent(null);
-        } else {
+        const parent_toplevel: ?*window.Window.Toplevel = if (parent_view_id < 0)
+            null
+        else blk: {
             const parent = app.viewForId(parent_view_id) orelse return .unknown_view;
-            view.win.setParent(parent.win);
+            break :blk switch (parent.win.role) {
+                .toplevel => |*toplevel| toplevel,
+                .popup, .layer => null,
+            };
+        };
+        switch (view.win.role) {
+            .toplevel => |*toplevel| toplevel.setParent(parent_toplevel),
+            .popup, .layer => {},
         }
         view.win.commit();
         return .ok;
@@ -1048,9 +1111,12 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        if (!view.win.isPopup()) return .unsupported;
+        const popup = switch (view.win.role) {
+            .popup => |*popup| popup,
+            .toplevel, .layer => return .unsupported,
+        };
 
-        var request = view.win.positioner;
+        var request = popup.positioner;
         if (positioner) |value| request = value.*;
         if (anchor) |value| request.anchor_rect = value.*;
         if (view.win.isSizedToContent()) {
@@ -1064,8 +1130,8 @@ pub const App = struct {
         const xdg_positioner = makePositioner(app, request) catch return .backend_failed;
         defer xdg_positioner.destroy();
 
-        view.win.reposition(xdg_positioner);
-        view.win.positioner = request;
+        popup.reposition(xdg_positioner);
+        popup.positioner = request;
         view.win.commit();
         return .ok;
     }
@@ -1077,12 +1143,14 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        if (!view.win.isLayer()) return .unsupported;
+        switch (view.win.role) {
+            .layer => {},
+            .toplevel, .popup => return .unsupported,
+        }
         // The input region is a wl_surface request, not layer-shell state.
         app.ctx.conn.setSurfaceInputRegion(view.win.surface, layer.accepts_input != 0) catch
             return .backend_failed;
         view.win.applyLayerSurface(layer.*) catch |err| return switch (err) {
-            error.NotALayerSurface => .unsupported,
             error.InvalidLayer,
             error.InvalidSize,
             error.InvalidKeyboardInteractivity,
@@ -1109,14 +1177,20 @@ pub const App = struct {
     fn bridgeGetState(ctx: ?*anyopaque, view_id: i64, out: *u32) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        out.* = view.win.state_bits;
+        out.* = switch (view.win.role) {
+            .toplevel => |toplevel| toplevel.toplevelState(),
+            .popup, .layer => 0,
+        };
         return .ok;
     }
 
     fn bridgeGetCapabilities(ctx: ?*anyopaque, view_id: i64, out: *u32) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        out.* = view.win.wm_capabilities;
+        out.* = switch (view.win.role) {
+            .toplevel => |toplevel| toplevel.wmCapabilities(),
+            .popup, .layer => 0,
+        };
         return .ok;
     }
 
@@ -1142,7 +1216,10 @@ pub const App = struct {
     ) windowing.Status {
         const app: *App = @ptrCast(@alignCast(ctx.?));
         const view = app.viewForId(view_id) orelse return .unknown_view;
-        out.* = view.win.offset_from_parent;
+        out.* = switch (view.win.role) {
+            .popup => |popup| popup.offsetFromParent(),
+            .toplevel, .layer => .{ .x = 0, .y = 0 },
+        };
         return .ok;
     }
 };
@@ -1270,7 +1347,7 @@ fn runContentResize(user_data: ?*anyopaque) void {
     defer std.heap.c_allocator.destroy(req);
 
     const view = req.app.viewForId(req.view_id) orelse return;
-    if (!view.win.isTrackingContentSize()) {
+    if (!view.win.isSizedToContent()) {
         view.content_resize_pending.store(false, .release);
         return;
     }
@@ -1282,26 +1359,29 @@ fn runContentResize(user_data: ?*anyopaque) void {
     const width = scale.logical(physical_width, view.win.pixel_ratio);
     const height = scale.logical(physical_height, view.win.pixel_ratio);
 
-    if (view.win.isPopup()) {
-        var positioner = view.win.positioner;
-        positioner.size = .{ .width = width, .height = height };
+    switch (view.win.role) {
+        .popup => |*popup| {
+            var positioner = popup.positioner;
+            positioner.size = .{ .width = width, .height = height };
 
-        const xdg_positioner = makePositioner(req.app, positioner) catch {
-            view.content_resize_pending.store(false, .release);
+            const xdg_positioner = makePositioner(req.app, positioner) catch {
+                view.content_resize_pending.store(false, .release);
+                return;
+            };
+            defer xdg_positioner.destroy();
+
+            popup.reposition(xdg_positioner);
+            popup.positioner = positioner;
+            view.win.commit();
+            // The popup keeps its content-sized baseline even if the compositor
+            // adjusts the final geometry in its configure; otherwise the next
+            // identical frame would request another reposition.
+            view.updateContentSize(physical_width, physical_height);
+            // The configure event that follows clears the pending flag and
+            // sends the new metrics.
             return;
-        };
-        defer xdg_positioner.destroy();
-
-        view.win.reposition(xdg_positioner);
-        view.win.positioner = positioner;
-        view.win.commit();
-        // The popup keeps its content-sized baseline even if the compositor
-        // adjusts the final geometry in its configure; otherwise the next
-        // identical frame would request another reposition.
-        view.updateContentSize(physical_width, physical_height);
-        // The configure event that follows clears the pending flag and sends
-        // the new metrics.
-        return;
+        },
+        .toplevel, .layer => {},
     }
 
     view.win.applyContentSize(width, height);
@@ -1948,11 +2028,16 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
         }
 
         // A dismissed popup is already gone from the compositor's point of
-        // view (`popup_done` says the client should destroy it), so tear the
-        // view down. The controller sees the `on_destroy` event.
-        if (view.win.popup_done) {
-            view.win.popup_done = false;
-            view.destroy_requested = true;
+        // view (the `popup_done` event says the client should destroy it), so
+        // tear the view down. The controller sees the `on_destroy` event.
+        switch (view.win.role) {
+            .popup => |*popup| {
+                if (popup.done) {
+                    popup.done = false;
+                    view.destroy_requested = true;
+                }
+            },
+            .toplevel, .layer => {},
         }
 
         if (view.destroy_requested) {
