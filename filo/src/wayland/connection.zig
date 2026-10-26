@@ -31,6 +31,8 @@ const Globals = struct {
     outputs: std.ArrayListUnmanaged(OutputInfo) = .empty,
     layer_shell_name: ?u32 = null,
     layer_shell_version: u32 = 0,
+    activation_name: ?u32 = null,
+    activation_version: u32 = 0,
 };
 
 /// The Wayland connection: the display, its global objects (compositor, xdg,
@@ -51,6 +53,9 @@ pub const Connection = struct {
     outputs: std.ArrayListUnmanaged(*wl.Output) = .empty,
     /// The compositor's wlr-layer-shell implementation, if it advertises one.
     layer_shell: ?*zwlr.LayerShellV1 = null,
+    /// The compositor's xdg-activation support, if it advertises the global.
+    /// Without it, activation requests fall back to the compositor's policy.
+    activation: ?*xdg.ActivationV1 = null,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
     /// The compositor's cursor-shape-v1 support, if it advertises the global.
@@ -142,6 +147,11 @@ pub const Connection = struct {
             self.layer_shell = registry.bind(name, zwlr.LayerShellV1, version) catch null;
         }
 
+        if (globals.activation_name) |name| {
+            const version = @min(globals.activation_version, xdg.ActivationV1.generated_version);
+            self.activation = registry.bind(name, xdg.ActivationV1, version) catch null;
+        }
+
         return self;
     }
 
@@ -163,6 +173,7 @@ pub const Connection = struct {
             // `destroy` needs version 3; below that drop the proxy directly.
             if (ls.getVersion() >= 3) ls.destroy() else @as(*wl.Proxy, @ptrCast(ls)).destroy();
         }
+        if (self.activation) |activation| activation.destroy();
         // `wl_data_device_manager` has no destructor below version 4, which is
         // all we bind, so drop the proxy directly.
         @as(*wl.Proxy, @ptrCast(self.data_device_manager)).destroy();
@@ -529,6 +540,11 @@ pub const Connection = struct {
                     if (globals.layer_shell_name == null) {
                         globals.layer_shell_name = global.name;
                         globals.layer_shell_version = global.version;
+                    }
+                } else if (std.mem.orderZ(u8, global.interface, xdg.ActivationV1.interface.name) == .eq) {
+                    if (globals.activation_name == null) {
+                        globals.activation_name = global.name;
+                        globals.activation_version = global.version;
                     }
                 }
             },
