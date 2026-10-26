@@ -17,6 +17,7 @@ const manifest = @import("manifest.zig");
 const runtime = @import("runtime.zig");
 pub const engine = @import("engine.zig");
 pub const wl = @import("wayland").client.wl;
+pub const xdg = @import("wayland").client.xdg;
 
 /// Runtime configuration: engine library, ICU data, Flutter assets and the
 /// embedder's optional renderer/debug switches.

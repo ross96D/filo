@@ -322,7 +322,7 @@ pub const Runtime = struct {
         allocator.destroy(self);
     }
 
-    pub fn view_by_id(self: *const Runtime, id: engine.ViewId) *app_mod.View {
-        return self.app.views_by_id(id);
+    pub fn view_by_id(self: *const Runtime, id: engine.ViewId) ?*app_mod.View {
+        return self.app.views_by_id.get(id);
     }
 };
