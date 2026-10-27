@@ -201,7 +201,10 @@ pub const Engine = struct {
         self_slot.*.store(self, .release);
         errdefer self_slot.*.store(null, .release);
 
-        self.lib = try std.DynLib.open(cfg.engine_lib);
+        self.lib = std.DynLib.open(cfg.engine_lib) catch |err| {
+            std.debug.print("error dlopen {s}: {}\n", .{ cfg.engine_lib, err });
+            return err;
+        };
         errdefer self.lib.close();
 
         const get_proc_addresses: GetProcAddressesFn = self.lib.lookup(
