@@ -159,16 +159,26 @@ For `flutter run -d <device>`, use the per-app runner template in
 repository is `demos/multiple_windows/wayland/`. The template contains:
 
 - a Zig host that imports `filo` and calls `filo.run`,
-- `postBuild`/`install`/`uninstall`/`runDebug` hooks,
-- a `custom-device.json` and a registration script.
+- a single Dart tool, `tool/wayland.dart`, implementing the
+  `postBuild`/`install`/`uninstall`/`ping` hooks plus setup and device
+  registration,
+- a `custom-device.json` whose `runDebug` starts the native host directly,
+- a launch manifest written by the hooks and read by the host.
 
-Copy it into an app as `wayland/`, fetch filo into it, provide an engine path in
-`.env.local`, and register the device once with `wayland/register-device.sh`.
-The same global device entry works for every app that has a `wayland/` folder.
+Copy it into an app as `wayland/`, fetch filo into it with
+`dart wayland/tool/wayland.dart setup-filo <url>`, provide an engine path in
+`.env.local`, and register the device once with
+`dart wayland/tool/wayland.dart register-device`. The same global device entry
+works for every app that has a `wayland/` folder.
 
-Flutter custom devices do not forward `--dart-entrypoint-args`; use
-`FILO_DART_ENTRYPOINT_ARGS` with one argument per line instead. Engine switches
-from `${engineOptions}` are currently ignored.
+`.env.local` is parsed by the Dart tool, not sourced by a shell; it supports
+`KEY=VALUE`, comments, quotes and `$'...'` escapes, but no variable expansion or
+command substitution.
+
+Flutter custom devices do not forward `--dart-entrypoint-args`; set
+`FILO_DART_ENTRYPOINT_ARGS` with one argument per line when running Flutter (or
+put it in `.env.local`). The post-build hook records it in the launch manifest.
+Engine switches from `${engineOptions}` are currently ignored.
 
 Flutter custom devices only support debug builds. Release builds still need a
 separate AOT bundle and a manual launch with `FILO_AOT_LIB` set.
