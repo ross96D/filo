@@ -20,16 +20,15 @@ pub const MouseCursor = struct {
     set: *const fn (user_data: ?*anyopaque, cursor: Cursor) void,
 
     pub fn handlePlatformMessage(self: *MouseCursor, message: *const c.FlutterPlatformMessage) void {
-        const msg = message.*;
         var data: []const u8 = &.{};
-        if (msg.message != null) data = msg.message[0..msg.message_size];
+        if (message.message != null) data = message.message[0..message.message_size];
 
         if (types.decode(data)) |cursor| self.set(self.user_data, cursor);
 
         // The framework awaits this call from its mouse tracker. Always answer
         // with a standard success, including for malformed or unknown messages,
         // so a decoding difference cannot surface as an exception in the app.
-        self.eng.sendPlatformMessageResponse(msg.response_handle, codec.standard_success);
+        self.eng.sendPlatformMessageResponse(message.response_handle, codec.standard_method_success);
     }
 };
 

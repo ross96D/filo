@@ -190,6 +190,10 @@ pub const Connection = struct {
     /// Read and dispatch one batch of compositor events. Called by the event
     /// loop when the fd is readable, so the wait inside does not block.
     pub fn dispatch(self: *Connection) !void {
+        if (self.display.prepareRead()) {
+            const err = self.display.readEvents();
+            if (err != .SUCCESS and err != .AGAIN) return error.DispatchFailed;
+        }
         if (self.display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
     }
 

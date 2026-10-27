@@ -22,6 +22,7 @@ pub const Codec = enum {
     /// `JSONMessageCodec` (`BasicMessageChannel`): replies are a bare JSON
     /// value.
     json_message,
+    standard_message,
 };
 
 pub const Channel = struct {
@@ -31,7 +32,6 @@ pub const Channel = struct {
 
 /// Outgoing only: the embedder sends raw key events here.
 pub const keyevent = Channel{ .name = "flutter/keyevent", .codec = .json_message };
-
 /// `SystemChannels.textInput`.
 pub const text_input = Channel{ .name = "flutter/textinput", .codec = .json_method };
 /// `SystemChannels.platform`: clipboard, `SystemChrome`, `SystemNavigator`, ...
@@ -71,6 +71,9 @@ pub const sensitive_content = Channel{ .name = "flutter/sensitivecontent", .code
 /// The embedder's own window lifecycle channel.
 pub const windows = Channel{ .name = "filo/windows", .codec = .json_method };
 
+// accesibility channel
+pub const accessibility = Channel{ .name = "flutter/accessibility", .codec = .standard_message };
+
 /// The handler that answers a channel's messages.
 pub const Handler = enum { text_input, platform, windows, mouse_cursor };
 
@@ -95,6 +98,7 @@ pub const routes = [_]table.Entry(Route){
     .{ .name = skia.name, .value = .{ .codec = skia.codec } },
     .{ .name = undo_manager.name, .value = .{ .codec = undo_manager.codec } },
     .{ .name = scribe.name, .value = .{ .codec = scribe.codec } },
+    .{ .name = accessibility.name, .value = .{ .codec = accessibility.codec } },
 };
 
 test "routes carry the handler and codec of each channel the framework sends" {

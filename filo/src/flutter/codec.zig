@@ -13,9 +13,12 @@ pub const no_args: std.json.Value = .null;
 /// A successful `JSONMessageCodec` reply: a bare JSON value.
 pub const json_null: []const u8 = "null";
 
+/// A successful `StandardMessageCodec` reply: a single standard-encoded null.
+pub const standard_message_success: []const u8 = &.{0x00};
+
 /// A successful `StandardMethodCodec` reply: the success marker (0x00)
 /// followed by a standard-encoded null.
-pub const standard_success: []const u8 = &.{ 0x00, 0x00 };
+pub const standard_method_success: []const u8 = &.{ 0x00, 0x00 };
 
 const error_fallback: []const u8 = "[\"error\",\"error\",null]";
 
@@ -31,7 +34,8 @@ pub fn defaultReply(codec: channels.Codec) []const u8 {
     return switch (codec) {
         .json_method => json_success,
         .json_message => json_null,
-        .standard_method => standard_success,
+        .standard_method => standard_method_success,
+        .standard_message => standard_message_success,
     };
 }
 
