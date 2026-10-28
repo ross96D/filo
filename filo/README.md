@@ -159,9 +159,9 @@ For `flutter run -d <device>`, use the per-app runner template in
 repository is `demos/multiple_windows/wayland/`. The template contains:
 
 - a Zig host that imports `filo` and calls `filo.run`,
-- a single Dart tool, `tool/wayland.dart`, implementing the
-  `postBuild`/`install`/`uninstall`/`ping` hooks plus setup and device
-  registration,
+- a Dart tool entrypoint, `tool/wayland.dart`, with one file per command under
+  `tool/src/commands/`, implementing the `postBuild`/`install`/`uninstall`/
+  `ping` hooks plus setup, release builds and device registration,
 - a `custom-device.json` whose `runDebug` starts the native host directly,
 - a launch manifest written by the hooks and read by the host.
 
@@ -180,8 +180,12 @@ Flutter custom devices do not forward `--dart-entrypoint-args`; set
 put it in `.env.local`). The post-build hook records it in the launch manifest.
 Engine switches from `${engineOptions}` are currently ignored.
 
-Flutter custom devices only support debug builds. Release builds still need a
-separate AOT bundle and a manual launch with `FILO_AOT_LIB` set.
+Flutter custom devices only support debug builds. For release, use the
+template's `build-release` command: it runs `flutter assemble` for the AOT
+snapshot, builds the host with `-Doptimize=ReleaseFast`, writes the launch
+manifest and stages a relocatable bundle in `build/wayland/dist/<appName>/`.
+See the template README for the required `FILO_ENGINE_LIB_RELEASE` engine and
+the bundle layout.
 
 ## Development
 

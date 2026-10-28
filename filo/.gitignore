@@ -3,3 +3,4 @@ zig-out
 .zig-cache
 zig-pkg
 multiwindow-plan.md
+templates/pubspec.lock

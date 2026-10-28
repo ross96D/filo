@@ -9,6 +9,7 @@ dependencies:
   vector_math: ^2.2.0
   filo_windowing:
     path: ../../packages/filo_windowing
+  args: ^2.7.0
 
 dev_dependencies:
   flutter_test:
