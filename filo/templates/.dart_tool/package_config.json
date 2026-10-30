@@ -8,6 +8,12 @@
       "languageVersion": "3.3"
     },
     {
+      "name": "path",
+      "rootUri": "file:///home/ross/.puro/shared/pub_cache/hosted/pub.dev/path-1.9.1",
+      "packageUri": "lib/",
+      "languageVersion": "3.4"
+    },
+    {
       "name": "tool",
       "rootUri": "../",
       "packageUri": "lib/",

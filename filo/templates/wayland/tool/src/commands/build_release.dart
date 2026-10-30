@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
+
 import '../tool.dart';
 
 /// The supported `--optimize` values and their Zig build modes.
@@ -12,15 +14,11 @@ const _zigOptimize = {
 };
 
 const _targetPlatforms = ['linux-x64', 'linux-arm64', 'linux-riscv64'];
+const _targetArch = ["x64", "arm64", "riscv64"];
 
 class BuildReleaseCommand extends ToolCommand {
   BuildReleaseCommand() {
     argParser
-      ..addFlag(
-        'run',
-        negatable: false,
-        help: 'Launch the staged bundle after building.',
-      )
       ..addOption(
         'dist',
         valueHelp: 'dir',
@@ -68,24 +66,22 @@ class BuildReleaseCommand extends ToolCommand {
   String get name => 'build-release';
 
   @override
-  String get description =>
-      'Build an AOT bundle and a relocatable release dist.';
+  String get description => 'Build an AOT bundle and a relocatable release dist.';
 
   @override
   Future<void> run() async {
     final results = argResults!;
     final appName = (results['app-name'] as String?) ?? tool.appName();
     final target = results['target'] as String;
-    final targetPlatform =
-        (results['target-platform'] as String?) ?? tool.hostTargetPlatform();
+    final targetPlatform = (results['target-platform'] as String?) ?? tool.hostTargetPlatform();
+    final arch = _targetArch[_targetPlatforms.indexOf(targetPlatform)];
     final optimize = _zigOptimize[results['optimize'] as String]!;
-    final distDir = resolvePath(
-      (results['dist'] as String?) ?? tool.paths.defaultDistDir,
+    final distDir = p.join(
       tool.paths.appRoot,
+      (results['dist'] as String?) ?? tool.paths.defaultBundleDir(arch, "release"),
     );
     final dartDefines = results['dart-define'] as List<String>;
     final dartDefineFiles = results['dart-define-from-file'] as List<String>;
-    final runAfterBuild = results['run'] as bool;
     final encodedDefines = _encodeDefines(
       tool.paths.appRoot,
       dartDefines,
@@ -103,13 +99,22 @@ class BuildReleaseCommand extends ToolCommand {
 
     // Resolve the engine and ICU data first so a missing prerequisite fails
     // before the expensive Flutter build.
-    final engine = tool.releaseEngine();
+    final engine = tool.env('FILO_ENGINE_LIB_RELEASE') ??
+        p.join(tool.paths.waylandDir, 'engine/release/libflutter_engine.so');
+    if (!File(engine).existsSync()) {
+      throw ToolError(
+        'release engine file not found in $engine; '
+        'set FILO_ENGINE_LIB_RELEASE in wayland/.env.local '
+        'to a release-built libflutter_engine.so or copy one to '
+        '${p.join(tool.paths.waylandDir, 'engine/release/libflutter_engine.so')}',
+      );
+    }
     final icu = tool.releaseIcu(targetPlatform);
 
     // `flutter assemble` only writes the outputs it is asked for; remove the
     // directory so a previous debug bundle cannot leave kernel_blob.bin or
     // other stale files in the release assets.
-    final releaseDir = Directory(tool.paths.releaseDir);
+    final releaseDir = Directory(tool.paths.buildDir(arch, "release"));
     if (releaseDir.existsSync()) {
       releaseDir.deleteSync(recursive: true);
     }
@@ -175,12 +180,9 @@ class BuildReleaseCommand extends ToolCommand {
     if (bundleDir.existsSync()) {
       bundleDir.deleteSync(recursive: true);
     }
-    final binDir = Directory('${bundleDir.path}/bin')
-      ..createSync(recursive: true);
-    final libDir = Directory('${bundleDir.path}/lib')
-      ..createSync(recursive: true);
-    final dataDir = Directory('${bundleDir.path}/data')
-      ..createSync(recursive: true);
+    final binDir = Directory('${bundleDir.path}/bin')..createSync(recursive: true);
+    final libDir = Directory('${bundleDir.path}/lib')..createSync(recursive: true);
+    final dataDir = Directory('${bundleDir.path}/data')..createSync(recursive: true);
 
     host.copySync('${binDir.path}/$appName');
     makeExecutable('${binDir.path}/$appName');
@@ -206,14 +208,6 @@ class BuildReleaseCommand extends ToolCommand {
 
     stdout.writeln('$toolName: staged ${bundleDir.path}');
     stdout.writeln('$toolName: launcher $launcher');
-
-    if (runAfterBuild) {
-      await startAndWait(
-        launcher,
-        const [],
-        workingDirectory: tool.paths.appRoot,
-      );
-    }
   }
 }
 
@@ -227,7 +221,7 @@ String _encodeDefines(
 ) {
   final values = <String, String>{};
   for (final file in files) {
-    values.addAll(_readDefineFile(resolvePath(file, appRoot)));
+    values.addAll(_readDefineFile(p.join(file, appRoot)));
   }
   for (final define in defines) {
     final equals = define.indexOf('=');

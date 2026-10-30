@@ -4,6 +4,9 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:args/command_runner.dart';
+import 'package:path/path.dart' as p;
+
+import 'env_parser.dart';
 
 /// The prefix used for all tool output.
 const toolName = 'filo-wayland';
@@ -23,9 +26,8 @@ class ToolPaths {
   final String waylandDir;
 
   String get hostDir => '$waylandDir/zig-out/bin';
-  String get buildDir => '$appRoot/build/wayland';
-  String get releaseDir => '$buildDir/release';
-  String get defaultDistDir => '$buildDir/dist';
+  String buildDir(String arch, String mode) => '$appRoot/build/wayland/$arch/$mode';
+  String defaultBundleDir(String arch, String mode) => '${buildDir(arch, mode)}/bundle';
   String get launchBuildFile => '$waylandDir/.filo-build/launch.json';
   String get launchFile => '$waylandDir/.filo/launch.json';
   String get dotenvFile => '$waylandDir/.env.local';
@@ -70,16 +72,6 @@ class ToolPaths {
   }
 }
 
-String resolvePath(String path, String base) {
-  final absolute = path.startsWith('/') ? path : '$base/$path';
-  return Uri.file(absolute).normalizePath().toFilePath();
-}
-
-String? resolveOptionalPath(String? path, String base) {
-  if (path == null || path.isEmpty) return null;
-  return resolvePath(path, base);
-}
-
 Map<String, Object?>? readManifest(String path) {
   final file = File(path);
   if (!file.existsSync()) return null;
@@ -103,142 +95,32 @@ void writeJson(String path, Map<String, Object?> value) {
   );
 }
 
-String? stringField(Map<String, Object?>? map, String key) {
-  final value = map?[key];
-  return value is String && value.isNotEmpty ? value : null;
-}
-
-bool boolField(Map<String, Object?>? map, String key) => map?[key] == true;
-
-List<String>? stringListField(Map<String, Object?>? map, String key) {
-  final value = map?[key];
-  if (value is! List) return null;
-  return [
-    for (final item in value)
-      if (item is String) item,
-  ];
-}
-
-String requireValue(String? value, String message) {
-  if (value == null) throw ToolError(message);
-  return value;
-}
-
-/// Parse `wayland/.env.local`.
-///
-/// Supports `KEY=VALUE`, comments, single/double quoted values and `$'...'`
-/// escapes. Variable expansion and command substitution are rejected.
-Map<String, String> readDotEnv(String path) {
-  final file = File(path);
-  if (!file.existsSync()) return const {};
-  final values = <String, String>{};
-  final lines = file.readAsLinesSync();
-  for (var index = 0; index < lines.length; index++) {
-    final location = '$path:${index + 1}';
-    var line = lines[index].trim();
-    if (line.isEmpty || line.startsWith('#')) continue;
-    if (line.startsWith('export ')) {
-      line = line.substring('export '.length).trimLeft();
-    }
-    final equals = line.indexOf('=');
-    if (equals <= 0) {
-      throw ToolError('$location: expected KEY=VALUE');
-    }
-    final key = line.substring(0, equals).trim();
-    if (!_envKey.hasMatch(key)) {
-      throw ToolError('$location: invalid variable name "$key"');
-    }
-    final raw = line.substring(equals + 1).trim();
-    values[key] = _parseDotEnvValue(raw, location);
+extension MapExt on Map<String, Object?>? {
+  T fieldRequire<T>(String key, String message) {
+    if (this == null) throw ToolError(message);
+    final value = this![key];
+    if (value is! T) throw ToolError(message);
+    return value;
   }
-  return values;
-}
 
-final _envKey = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
-final _shellExpansion = RegExp(r'\$[A-Za-z_{(]');
+  String? fieldStr(String key) {
+    final value = this?[key];
+    return value is String && value.isNotEmpty ? value : null;
+  }
 
-String _parseDotEnvValue(String raw, String location) {
-  if (raw.isEmpty) return '';
-  if (raw.startsWith(r"$'")) {
-    if (raw.length < 3 || !raw.endsWith("'")) {
-      throw ToolError("$location: unterminated \$'...' value");
-    }
-    return _parseAnsiC(raw.substring(2, raw.length - 1), location);
-  }
-  if (raw.startsWith("'")) {
-    if (raw.length < 2 || !raw.endsWith("'")) {
-      throw ToolError('$location: unterminated single-quoted value');
-    }
-    return raw.substring(1, raw.length - 1);
-  }
-  if (raw.startsWith('"')) {
-    if (raw.length < 2 || !raw.endsWith('"')) {
-      throw ToolError('$location: unterminated double-quoted value');
-    }
-    return _parseDoubleQuoted(raw.substring(1, raw.length - 1), location);
-  }
-  _rejectExpansion(raw, location);
-  return raw;
-}
+  bool fieldBool(String key) => this?[key] == true;
 
-String _parseDoubleQuoted(String body, String location) {
-  _rejectExpansion(body, location);
-  final out = StringBuffer();
-  for (var index = 0; index < body.length; index++) {
-    final char = body[index];
-    if (char == r'\' &&
-        index + 1 < body.length &&
-        (body[index + 1] == '"' || body[index + 1] == r'\')) {
-      out.write(body[index + 1]);
-      index++;
-    } else {
-      out.write(char);
-    }
-  }
-  return out.toString();
-}
-
-String _parseAnsiC(String body, String location) {
-  final out = StringBuffer();
-  for (var index = 0; index < body.length; index++) {
-    final char = body[index];
-    if (char != r'\') {
-      out.write(char);
-      continue;
-    }
-    index++;
-    if (index >= body.length) {
-      throw ToolError("$location: trailing backslash in \$'...' value");
-    }
-    switch (body[index]) {
-      case 'n':
-        out.write('\n');
-      case 'r':
-        out.write('\r');
-      case 't':
-        out.write('\t');
-      case r'\':
-        out.write(r'\');
-      case "'":
-        out.write("'");
-      case '"':
-        out.write('"');
-      default:
-        throw ToolError(
-          "$location: unknown escape \"\\${body[index]}\" in \$'...' value",
-        );
-    }
-  }
-  return out.toString();
-}
-
-void _rejectExpansion(String value, String location) {
-  if (value.contains('`') || _shellExpansion.hasMatch(value)) {
-    throw ToolError(
-      '$location: shell expansion is not supported; use a literal value',
-    );
+  List<String>? fieldStrList(String key) {
+    final value = this?[key];
+    if (value is! List) return null;
+    return [
+      for (final item in value)
+        if (item is String) item,
+    ];
   }
 }
+
+T require<T>(T? value, String message) => value == null ? throw ToolError(message) : value;
 
 Future<void> runInherited(
   String executable,
@@ -262,73 +144,6 @@ Future<void> runInherited(
     throw ToolError(
       '$executable ${arguments.join(' ')} failed with exit code $code',
     );
-  }
-}
-
-Future<void> runQuiet(
-  String executable,
-  List<String> arguments, {
-  required String workingDirectory,
-  bool allowFailure = false,
-}) async {
-  final ProcessResult result;
-  try {
-    result = await Process.run(
-      executable,
-      arguments,
-      workingDirectory: workingDirectory,
-    );
-  } on ProcessException {
-    throw ToolError('$executable is not on PATH');
-  }
-  if (result.exitCode == 0 || allowFailure) return;
-  final output = '${result.stdout}${result.stderr}'.trim();
-  throw ToolError(
-    '$executable ${arguments.join(' ')} failed with exit code '
-    '${result.exitCode}${output.isEmpty ? '' : ':\n$output'}',
-  );
-}
-
-Future<void> startAndWait(
-  String executable,
-  List<String> arguments, {
-  required String workingDirectory,
-}) async {
-  final Process process;
-  try {
-    process = await Process.start(
-      executable,
-      arguments,
-      workingDirectory: workingDirectory,
-      mode: ProcessStartMode.inheritStdio,
-    );
-  } on ProcessException {
-    throw ToolError('failed to run $executable');
-  }
-
-  final subscriptions = <StreamSubscription<ProcessSignal>>[];
-  void forward(ProcessSignal signal) {
-    try {
-      subscriptions.add(
-        signal.watch().listen((_) {
-          process.kill(signal);
-        }),
-      );
-    } on SignalException {
-      // Signal is not supported on this platform; ignore it.
-    }
-  }
-
-  forward(ProcessSignal.sigterm);
-  forward(ProcessSignal.sigint);
-  forward(ProcessSignal.sighup);
-
-  final code = await process.exitCode;
-  for (final subscription in subscriptions) {
-    await subscription.cancel();
-  }
-  if (code != 0) {
-    exitCode = code < 0 ? 128 - code : code;
   }
 }
 
@@ -375,22 +190,22 @@ class Tool {
 
   static Tool discover() => Tool(ToolPaths.discover());
 
-  String? setting(String key) => Platform.environment[key] ?? _dotenv[key];
+  String? env(String key) => Platform.environment[key] ?? _dotenv[key];
 
-  String? pathSetting(String key) {
-    final value = setting(key);
+  String? pathEnv(String key) {
+    final value = env(key);
     if (value == null || value.isEmpty) return null;
-    return resolvePath(value, paths.waylandDir);
+    return p.join(paths.waylandDir, value);
   }
 
   bool flag(String key, {required bool fallback}) {
-    final value = setting(key);
+    final value = env(key);
     if (value == null) return fallback;
     return value.isNotEmpty;
   }
 
   List<String>? dartArgsSetting() {
-    final value = setting('FILO_DART_ENTRYPOINT_ARGS');
+    final value = env('FILO_DART_ENTRYPOINT_ARGS');
     if (value == null) return null;
     if (value.isEmpty) return <String>[];
     final lines = value.split('\n');
@@ -407,26 +222,24 @@ class Tool {
     String? icuOverride,
     Map<String, Object?>? fallback,
   }) {
-    final engine = requireValue(
-      pathSetting('FILO_ENGINE_LIB') ??
-          stringField(fallback, 'engine') ??
-          localEngine(),
+    final engine = require(
+      pathEnv('FILO_ENGINE_LIB') ?? fallback.fieldStr('engine') ?? localEngine(),
       'FILO_ENGINE_LIB is not set; add it to wayland/.env.local',
     );
-    final icu = requireValue(
-      pathSetting('FILO_ICU_DATA') ??
-          resolveOptionalPath(icuOverride, paths.appRoot) ??
-          stringField(fallback, 'icu'),
+    final icu = require(
+      pathEnv('FILO_ICU_DATA') ??
+          (icuOverride != null ? p.join(paths.appRoot, icuOverride) : null) ??
+          fallback.fieldStr('icu'),
       'no Flutter ICU data path; run post-build or set FILO_ICU_DATA',
     );
-    final assets = requireValue(
-      pathSetting('FILO_ASSETS') ??
-          resolveOptionalPath(localPath, paths.appRoot) ??
-          stringField(fallback, 'assets') ??
+    final assets = require(
+      pathEnv('FILO_ASSETS') ??
+          (localPath != null ? p.join(paths.appRoot, localPath) : null) ??
+          fallback.fieldStr('assets') ??
           defaultAssets(),
       'no flutter_assets directory; run install or set FILO_ASSETS',
     );
-    final aot = pathSetting('FILO_AOT_LIB') ?? stringField(fallback, 'aot');
+    final aot = pathEnv('FILO_AOT_LIB') ?? fallback.fieldStr('aot');
 
     return launchManifest(
       appName: appName,
@@ -452,26 +265,23 @@ class Tool {
       'icu': icu,
       'assets': assets,
       'aot': aot,
-      'dart_args':
-          dartArgsSetting() ??
-          stringListField(fallback, 'dart_args') ??
-          <String>[],
+      'dart_args': dartArgsSetting() ?? fallback.fieldStrList('dart_args') ?? <String>[],
       'force_impeller': flag(
         'FORCE_IMPELLER',
-        fallback: boolField(fallback, 'force_impeller'),
+        fallback: fallback.fieldBool('force_impeller'),
       ),
       'vulkan_validation': flag(
         'FILO_VULKAN_VALIDATION',
-        fallback: boolField(fallback, 'vulkan_validation'),
+        fallback: fallback.fieldBool('vulkan_validation'),
       ),
-      'trace': flag('FILO_TRACE', fallback: boolField(fallback, 'trace')),
+      'trace': flag('FILO_TRACE', fallback: fallback.fieldBool('trace')),
       'layer_only': flag(
         'FILO_LAYER_ONLY',
-        fallback: boolField(fallback, 'layer_only'),
+        fallback: fallback.fieldBool('layer_only'),
       ),
       'windowing_spike': flag(
         'FILO_WINDOWING_SPIKE',
-        fallback: boolField(fallback, 'windowing_spike'),
+        fallback: fallback.fieldBool('windowing_spike'),
       ),
     };
   }
@@ -525,33 +335,13 @@ class Tool {
     }
   }
 
-  String releaseEngine() {
-    final configured = pathSetting('FILO_ENGINE_LIB_RELEASE');
-    if (configured != null) {
-      if (!File(configured).existsSync()) {
-        throw ToolError(
-          'FILO_ENGINE_LIB_RELEASE points to a missing file: $configured',
-        );
-      }
-      return configured;
-    }
-    final local = File(
-      '${paths.waylandDir}/engine/release/libflutter_engine.so',
-    );
-    if (local.existsSync()) return local.path;
-    throw ToolError(
-      'no release engine; set FILO_ENGINE_LIB_RELEASE in wayland/.env.local '
-      'to a release-built libflutter_engine.so',
-    );
-  }
-
   String releaseIcu(String targetPlatform) {
     final buildManifest = readManifest(paths.launchBuildFile);
     final installedManifest = readManifest(paths.launchFile);
     final candidates = <String?>[
-      pathSetting('FILO_ICU_DATA'),
-      stringField(buildManifest, 'icu'),
-      stringField(installedManifest, 'icu'),
+      pathEnv('FILO_ICU_DATA'),
+      buildManifest.fieldStr('icu'),
+      installedManifest.fieldStr('icu'),
       '${paths.waylandDir}/engine/icudtl.dat',
       flutterIcu(targetPlatform),
     ];
@@ -580,9 +370,8 @@ class Tool {
       return null;
     }
     if (decoded is! Map<String, dynamic>) return null;
-    final root = decoded['flutterRoot'];
-    if (root is! String || root.isEmpty) return null;
-    for (final platform in {targetPlatform, 'linux-x64'}) {
+    final root = decoded['flutterRoot']! as String;
+    for (final platform in [targetPlatform, 'linux-x64']) {
       final file = File(
         '$root/bin/cache/artifacts/engine/$platform/icudtl.dat',
       );

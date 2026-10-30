@@ -42,3 +42,28 @@ class RegisterDeviceCommand extends ToolCommand {
     );
   }
 }
+
+
+Future<void> runQuiet(
+  String executable,
+  List<String> arguments, {
+  required String workingDirectory,
+  bool allowFailure = false,
+}) async {
+  final ProcessResult result;
+  try {
+    result = await Process.run(
+      executable,
+      arguments,
+      workingDirectory: workingDirectory,
+    );
+  } on ProcessException {
+    throw ToolError('$executable is not on PATH');
+  }
+  if (result.exitCode == 0 || allowFailure) return;
+  final output = '${result.stdout}${result.stderr}'.trim();
+  throw ToolError(
+    '$executable ${arguments.join(' ')} failed with exit code '
+    '${result.exitCode}${output.isEmpty ? '' : ':\n$output'}',
+  );
+}
