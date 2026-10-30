@@ -1,0 +1,6 @@
+.dart_tool/
+.packages
+build/
+
+# Created by Flutter assemble when building the release bundle.
+linux/flutter/ephemeral/

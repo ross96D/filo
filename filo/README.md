@@ -152,6 +152,47 @@ try runtime.run(); // blocks
 must be built with `rdynamic`/`--export-dynamic`. No `dlopen` or `libfilo.so`
 is involved.
 
+## Dart native assets
+
+Flutter writes a `NativeAssetsManifest.json` into `flutter_assets` and copies
+the libraries built by Dart build hooks into
+`flutter_assets/native_assets/linux/`. The manifest stores only the file name,
+for example `["absolute","libnative_sum.so"]`.
+
+The engine resolves those entries with `dlopen`, and the call is made from
+`libflutter_engine.so`, not from the host executable. This has two
+consequences:
+
+- a host rpath does not help
+- the engine itself needs `$ORIGIN` in its `RUNPATH`
+
+The Wayland runner template therefore lays out a Flutter-style debug bundle:
+
+```text
+build/wayland/<arch>/debug/bundle/
+├── lib/
+│   ├── libflutter_engine.so -> <engine>
+│   └── libnative_sum.so
+└── data/
+    ├── icudtl.dat
+    └── flutter_assets -> <appRoot>/build/flutter_assets
+```
+
+The engine is symlinked into `bundle/lib`; the native asset libraries are
+copied there. Landing in the engine's `$ORIGIN` directory is what makes
+`dlopen("libnative_sum.so")` succeed. The same layout is staged for release,
+with real copies so the bundle stays relocatable.
+
+The engine is expected to have `$ORIGIN` in its `RUNPATH`; the runner does not
+patch it. Build the engine with `-Wl,-rpath,'$ORIGIN'`, or add it to a prebuilt
+engine with:
+
+```sh
+patchelf --add-rpath '$ORIGIN' /path/to/libflutter_engine.so
+```
+
+`demos/native_assets/` is a minimal end-to-end example.
+
 ## Flutter custom devices
 
 For `flutter run -d <device>`, use the per-app runner template in
@@ -183,9 +224,9 @@ Engine switches from `${engineOptions}` are currently ignored.
 Flutter custom devices only support debug builds. For release, use the
 template's `build-release` command: it runs `flutter assemble` for the AOT
 snapshot, builds the host with `-Doptimize=ReleaseFast`, writes the launch
-manifest and stages a relocatable bundle in `build/wayland/dist/<appName>/`.
-See the template README for the required `FILO_ENGINE_LIB_RELEASE` engine and
-the bundle layout.
+manifest and stages a relocatable bundle in
+`build/wayland/<arch>/release/bundle/`. See the template README for the
+required `FILO_ENGINE_LIB_RELEASE` engine and the bundle layout.
 
 ## Development
 
@@ -197,5 +238,8 @@ zig build test     # unit tests
 zig build fmt      # format in place
 ```
 
-The repository root `run.sh` sets the engine, ICU and asset paths and runs the
-development runner. For `flutter run`, use the custom-device template above.
+The repository root `run.sh` prepares a debug/release bundle under
+`<app>/build/wayland/<arch>/<mode>/bundle/`, sets the engine, ICU, asset and AOT
+paths, and runs the development runner. `FILO_ENGINE_LIB` /
+`FILO_ENGINE_LIB_RELEASE` override the engine source. For `flutter run`, use the
+custom-device template above.

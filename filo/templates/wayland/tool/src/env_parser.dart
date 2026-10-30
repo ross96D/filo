@@ -24,7 +24,7 @@ Map<String, String> readDotEnv(String path) {
       throw ToolError('$location: expected KEY=VALUE');
     }
     final key = line.substring(0, equals).trim();
-    final value = line.substring(equals).trim();
+    final value = line.substring(equals+1).trim();
     values[key] = value;
   }
   return values;

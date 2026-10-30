@@ -14,7 +14,6 @@ const _zigOptimize = {
 };
 
 const _targetPlatforms = ['linux-x64', 'linux-arm64', 'linux-riscv64'];
-const _targetArch = ["x64", "arm64", "riscv64"];
 
 class BuildReleaseCommand extends ToolCommand {
   BuildReleaseCommand() {
@@ -22,7 +21,8 @@ class BuildReleaseCommand extends ToolCommand {
       ..addOption(
         'dist',
         valueHelp: 'dir',
-        help: 'Bundle parent directory (default: build/wayland/dist).',
+        help:
+            'Bundle directory (default: build/wayland/<arch>/release/bundle).',
       )
       ..addOption(
         'app-name',
@@ -66,19 +66,22 @@ class BuildReleaseCommand extends ToolCommand {
   String get name => 'build-release';
 
   @override
-  String get description => 'Build an AOT bundle and a relocatable release dist.';
+  String get description =>
+      'Build an AOT bundle and a relocatable release dist.';
 
   @override
   Future<void> run() async {
     final results = argResults!;
     final appName = (results['app-name'] as String?) ?? tool.appName();
     final target = results['target'] as String;
-    final targetPlatform = (results['target-platform'] as String?) ?? tool.hostTargetPlatform();
-    final arch = _targetArch[_targetPlatforms.indexOf(targetPlatform)];
+    final targetPlatform =
+        (results['target-platform'] as String?) ?? tool.hostTargetPlatform();
+    final arch = tool.archForTargetPlatform(targetPlatform);
     final optimize = _zigOptimize[results['optimize'] as String]!;
     final distDir = p.join(
       tool.paths.appRoot,
-      (results['dist'] as String?) ?? tool.paths.defaultBundleDir(arch, "release"),
+      (results['dist'] as String?) ??
+          tool.paths.defaultBundleDir(arch, "release"),
     );
     final dartDefines = results['dart-define'] as List<String>;
     final dartDefineFiles = results['dart-define-from-file'] as List<String>;
@@ -162,34 +165,49 @@ class BuildReleaseCommand extends ToolCommand {
       throw ToolError('zig build did not create ${host.path}');
     }
 
-    // Keep the normal launch state working after a release build, so
-    // `dart wayland/tool/wayland.dart run` starts the release host.
-    writeJson(
-      tool.paths.launchFile,
-      tool.launchManifest(
-        appName: appName,
-        engine: engine,
-        icu: icu,
-        assets: assets.path,
-        aot: aot.path,
-      ),
-    );
-    stdout.writeln('$toolName: wrote ${tool.paths.launchFile}');
-
     final bundleDir = Directory(distDir);
     if (bundleDir.existsSync()) {
       bundleDir.deleteSync(recursive: true);
     }
-    final binDir = Directory('${bundleDir.path}/bin')..createSync(recursive: true);
-    final libDir = Directory('${bundleDir.path}/lib')..createSync(recursive: true);
-    final dataDir = Directory('${bundleDir.path}/data')..createSync(recursive: true);
+    final binDir = Directory('${bundleDir.path}/bin')
+      ..createSync(recursive: true);
+    final libDir = Directory('${bundleDir.path}/lib')
+      ..createSync(recursive: true);
+    final dataDir = Directory('${bundleDir.path}/data')
+      ..createSync(recursive: true);
 
     host.copySync('${binDir.path}/$appName');
     makeExecutable('${binDir.path}/$appName');
+    // The engine is copied so the distributed bundle is relocatable. It is
+    // expected to have `$ORIGIN` in its RUNPATH; that is what makes its own
+    // dlopen calls find the native assets beside it.
     File(engine).copySync('${libDir.path}/libflutter_engine.so');
     aot.copySync('${libDir.path}/libapp.so');
     File(icu).copySync('${dataDir.path}/icudtl.dat');
     copyTree(assets, Directory('${dataDir.path}/flutter_assets'));
+
+    final nativeAssets = tool.nativeAssetsDir(assets.path);
+    if (nativeAssets != null) {
+      for (final entity in nativeAssets.listSync(followLinks: true)) {
+        if (entity is File && entity.path.endsWith('.so')) {
+          entity.copySync('${libDir.path}/${p.basename(entity.path)}');
+        }
+      }
+    }
+
+    // Keep the normal launch state working after a release build, so
+    // `dart wayland/tool/wayland.dart run` starts against the staged bundle.
+    writeJson(
+      tool.paths.launchFile,
+      tool.launchManifest(
+        appName: appName,
+        engine: '${libDir.path}/libflutter_engine.so',
+        icu: '${dataDir.path}/icudtl.dat',
+        assets: '${dataDir.path}/flutter_assets',
+        aot: '${libDir.path}/libapp.so',
+      ),
+    );
+    stdout.writeln('$toolName: wrote ${tool.paths.launchFile}');
 
     // The staged bundle is relocatable: the launcher changes into the bundle
     // root and the manifest uses paths relative to it.

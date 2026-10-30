@@ -1,0 +1,17 @@
+name: native_assets_demo
+description: Minimal Dart native assets demo for the filo Wayland embedder.
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  native_sum:
+    path: native_sum
+  args: ^2.7.0
+  path: ^1.9.1
+
+flutter:
+  uses-material-design: true
