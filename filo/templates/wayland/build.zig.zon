@@ -3,10 +3,7 @@
     .version = "0.0.0",
     .fingerprint = 0xabcdef0123456789,
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{ .filo = .{
-        .url = "git+https://github.com/ross96D/filo#<commit>",
-        .hash = "<hash>",
-    } },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",

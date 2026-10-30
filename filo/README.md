@@ -26,7 +26,9 @@ Add the package to the host's `build.zig.zon`:
 zig fetch --save=filo git+https://github.com/ross96D/filo#master
 ```
 
-Or use a local checkout while developing:
+The repository root is a small package wrapper that exposes the module from
+`filo/`, so this Git URL works even though the embedder lives in a
+subdirectory. A local checkout can still point at `filo/` directly:
 
 ```zon
 .dependencies = .{
@@ -206,8 +208,9 @@ repository is `demos/multiple_windows/wayland/`. The template contains:
 - a `custom-device.json` whose `runDebug` starts the native host directly,
 - a launch manifest written by the hooks and read by the host.
 
-Copy it into an app as `wayland/`, fetch filo into it with
-`dart wayland/tool/wayland.dart setup-filo <url>`, provide an engine path in
+Copy it into an app as `wayland/`, run
+`dart wayland/tool/wayland.dart setup-filo <url>` to assign the Zig package
+identity and fetch filo with a pinned hash, provide an engine path in
 `.env.local`, and register the device once with
 `dart wayland/tool/wayland.dart register-device`. The same global device entry
 works for every app that has a `wayland/` folder.

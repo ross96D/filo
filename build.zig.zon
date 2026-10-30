@@ -1,0 +1,23 @@
+.{
+    .name = .filo_repository,
+    .version = "0.0.0",
+    .fingerprint = 0x0f21641ae4601186,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .wayland = .{
+            .path = "filo/vendor/zig-wayland",
+        },
+        .vulkan_zig = .{
+            .path = "filo/vendor/vulkan-zig",
+        },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio#9a5585c1bea43cc44b41dcd189f93f756ce50f37",
+            .hash = "zio-0.19.0-xHbVVJAoLQAoY0Ql0kXoGwerqa188THXuJ71g3jIyk5M",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "filo",
+    },
+}

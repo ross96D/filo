@@ -21,12 +21,25 @@ dart pub add args path
 1. Fetch filo into the copied Zig project:
 
    ```sh
-   dart wayland/tool/wayland.dart setup-filo <filo-package-url>
+   dart wayland/tool/wayland.dart setup-filo \
+     git+https://github.com/ross96D/filo#master
    ```
 
-   This runs `zig fetch --save=filo`, so the dependency is pinned by hash. The
-   package URL must point at the directory containing filo's `build.zig.zon`
-   (a Git URL to filo's repository, or a tarball).
+   The command:
+
+   - assigns `build.zig.zon` a package name derived from the app name,
+   - writes a valid Zig fingerprint for that name,
+   - runs `zig fetch --save=filo`, which downloads filo and pins its URL and
+     hash,
+   - optionally checks the build graph with `--check`.
+
+   The repository root is itself a small Zig package that exposes the `filo`
+   module from `filo/`, so the Git URL above works directly. A tarball that
+   contains filo's `build.zig.zon` at its root also works.
+
+   ```sh
+   dart wayland/tool/wayland.dart setup-filo --check <url-or-tarball>
+   ```
 
 2. Provide a standalone Flutter engine:
 
