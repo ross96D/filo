@@ -30,8 +30,6 @@ class SetupFiloCommand extends ToolCommand {
 
   @override
   Future<void> run() async {
-    final args = argResults!.rest;
-    expectCount(args, 1);
     final check = argResults!['check'] as bool;
 
     final manifest = File('${tool.paths.waylandDir}/build.zig.zon');
@@ -50,7 +48,7 @@ class SetupFiloCommand extends ToolCommand {
 
     await runInherited(
       'zig',
-      ['fetch', '--save=filo', args[0]],
+      ['fetch', '--save=filo', "https://github.com/ross96d/filo"],
       workingDirectory: tool.paths.waylandDir,
       missingMessage: 'zig is not on PATH',
     );
@@ -68,7 +66,7 @@ class SetupFiloCommand extends ToolCommand {
     if (hash != null) {
       stdout.writeln('$toolName: hash $hash');
     }
-    stdout.writeln('$toolName: fetched filo from ${args[0]}');
+    stdout.writeln('$toolName: fetched filo from https://github.com/ross96d/filo');
 
     if (check) {
       await _checkBuildGraph(tool.paths.waylandDir);
