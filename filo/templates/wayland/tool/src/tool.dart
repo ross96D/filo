@@ -26,10 +26,8 @@ class ToolPaths {
   final String waylandDir;
 
   String get hostDir => '$waylandDir/zig-out/bin';
-  String buildDir(String arch, String mode) =>
-      '$appRoot/build/wayland/$arch/$mode';
-  String defaultBundleDir(String arch, String mode) =>
-      '${buildDir(arch, mode)}/bundle';
+  String buildDir(String arch, String mode) => '$appRoot/build/wayland/$arch/$mode';
+  String defaultBundleDir(String arch, String mode) => '${buildDir(arch, mode)}/bundle';
   String get launchBuildFile => '$waylandDir/.filo-build/launch.json';
   String get launchFile => '$waylandDir/.filo/launch.json';
   String get dotenvFile => '$waylandDir/.env.local';
@@ -122,8 +120,7 @@ extension MapExt on Map<String, Object?>? {
   }
 }
 
-T require<T>(T? value, String message) =>
-    value == null ? throw ToolError(message) : value;
+T require<T>(T? value, String message) => value == null ? throw ToolError(message) : value;
 
 Future<void> runInherited(
   String executable,
@@ -165,35 +162,20 @@ void copyTree(Directory source, Directory destination) {
   }
 }
 
-void removePath(String path) {
-  final type = FileSystemEntity.typeSync(path, followLinks: false);
-  switch (type) {
-    case FileSystemEntityType.notFound:
-      return;
-    case FileSystemEntityType.link:
-      Link(path).deleteSync();
-      return;
-    case FileSystemEntityType.directory:
-      Directory(path).deleteSync(recursive: true);
-      return;
-    default:
-      File(path).deleteSync();
-      return;
-  }
-}
-
 void clearDirectory(Directory directory) {
   if (!directory.existsSync()) {
     directory.createSync(recursive: true);
     return;
   }
   for (final entity in directory.listSync(followLinks: false)) {
-    removePath(entity.path);
+    File(entity.path).deleteSync(recursive: true);
   }
 }
 
 void replaceLink(String linkPath, String target) {
-  removePath(linkPath);
+  try {
+    File(linkPath).deleteSync(recursive: true);
+  } catch (_) {}
   Link(linkPath).createSync(target);
 }
 
@@ -252,43 +234,17 @@ class Tool {
   }
 
   String _resolvePath(String value) {
-    return p.isAbsolute(value)
-        ? p.normalize(value)
-        : p.join(paths.waylandDir, value);
+    return p.isAbsolute(value) ? p.normalize(value) : p.join(paths.waylandDir, value);
   }
 
   String _resolveAppPath(String value) {
-    return p.isAbsolute(value)
-        ? p.normalize(value)
-        : p.join(paths.appRoot, value);
-  }
-
-  /// If [path] is a symlink inside a generated bundle, return its target. This
-  /// keeps repeated `post-build`/`install`/`run` calls from linking a bundle
-  /// entry to itself when they fall back to the previous launch manifest.
-  String _bundleSource(String path) {
-    final normalized = p.normalize(p.absolute(path));
-    final buildWayland = p.join(paths.appRoot, 'build', 'wayland');
-    if (!p.isWithin(buildWayland, normalized)) return normalized;
-    if (FileSystemEntity.typeSync(normalized, followLinks: false) !=
-        FileSystemEntityType.link) {
-      return normalized;
-    }
-    try {
-      final target = Link(normalized).targetSync();
-      final resolved = p.isAbsolute(target)
-          ? p.normalize(target)
-          : p.normalize(p.join(p.dirname(normalized), target));
-      return p.equals(resolved, normalized) ? normalized : resolved;
-    } on FileSystemException {
-      return normalized;
-    }
+    return p.isAbsolute(value) ? p.normalize(value) : p.join(paths.appRoot, value);
   }
 
   bool flag(String key, {required bool fallback}) {
     final value = env(key);
     if (value == null) return fallback;
-    return value.isNotEmpty;
+    return value.isNotEmpty && value != "0";
   }
 
   List<String>? dartArgsSetting() {
@@ -309,23 +265,23 @@ class Tool {
     String? icuOverride,
     Map<String, Object?>? fallback,
   }) {
-    final engine = _bundleSource(
+    final engine = File(
       require(
-        pathEnv('FILO_ENGINE_LIB') ??
-            fallback.fieldStr('engine') ??
-            localEngine(),
+        pathEnv('FILO_ENGINE_LIB') ?? fallback.fieldStr('engine') ?? localEngine(),
         'FILO_ENGINE_LIB is not set; add it to wayland/.env.local',
       ),
-    );
-    final icu = _bundleSource(
+    ).resolveSymbolicLinksSync();
+
+    final icu = File(
       require(
         pathEnv('FILO_ICU_DATA') ??
             (icuOverride != null ? _resolveAppPath(icuOverride) : null) ??
             fallback.fieldStr('icu'),
         'no Flutter ICU data path; run post-build or set FILO_ICU_DATA',
       ),
-    );
-    final assets = _bundleSource(
+    ).resolveSymbolicLinksSync();
+
+    final assets = File(
       require(
         pathEnv('FILO_ASSETS') ??
             (localPath != null ? _resolveAppPath(localPath) : null) ??
@@ -333,7 +289,8 @@ class Tool {
             defaultAssets(),
         'no flutter_assets directory; run install or set FILO_ASSETS',
       ),
-    );
+    ).resolveSymbolicLinksSync();
+
     final bundle = prepareBundle(
       mode: 'debug',
       assets: assets,
@@ -367,8 +324,7 @@ class Tool {
     final arch = hostArch();
     final root = paths.defaultBundleDir(arch, mode);
     final libDir = Directory(p.join(root, 'lib'))..createSync(recursive: true);
-    final dataDir = Directory(p.join(root, 'data'))
-      ..createSync(recursive: true);
+    final dataDir = Directory(p.join(root, 'data'))..createSync(recursive: true);
     clearDirectory(libDir);
     clearDirectory(dataDir);
 
@@ -376,7 +332,7 @@ class Tool {
     final enginePath = p.join(libDir.path, 'libflutter_engine.so');
     final icuPath = p.join(dataDir.path, 'icudtl.dat');
 
-    var assetsSource = _bundleSource(assets);
+    var assetsSource = File(assets).resolveSymbolicLinksSync();
     if (p.equals(assetsSource, assetsLink)) {
       final fallback = defaultAssets();
       if (fallback == null) {
@@ -387,7 +343,7 @@ class Tool {
       }
       assetsSource = fallback;
     }
-    var engineSource = _bundleSource(engine);
+    var engineSource = File(engine).resolveSymbolicLinksSync();
     if (p.equals(engineSource, enginePath)) {
       final fallback = localEngine();
       if (fallback == null) {
@@ -398,7 +354,7 @@ class Tool {
       }
       engineSource = fallback;
     }
-    final icuSource = _bundleSource(icu);
+    final icuSource = File(icu).resolveSymbolicLinksSync();
     if (p.equals(icuSource, icuPath)) {
       throw ToolError(
         'the launch manifest points ICU data at the bundle itself; '
@@ -460,8 +416,7 @@ class Tool {
       'icu': icu,
       'assets': assets,
       'aot': aot,
-      'dart_args':
-          dartArgsSetting() ?? fallback.fieldStrList('dart_args') ?? <String>[],
+      'dart_args': dartArgsSetting() ?? fallback.fieldStrList('dart_args') ?? <String>[],
       'force_impeller': flag(
         'FORCE_IMPELLER',
         fallback: fallback.fieldBool('force_impeller'),
