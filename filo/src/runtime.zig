@@ -98,7 +98,6 @@ pub const Runtime = struct {
             .vulkan_validation = config.vulkan_validation,
             .trace = config.trace,
             .bootstrap_layer = config.bootstrap_layer,
-            .windowing_spike = config.windowing_spike,
             .engine_args = config.engine_args,
             .dart_entrypoint_args = config.dart_entrypoint_args,
         };
@@ -150,7 +149,6 @@ pub const Runtime = struct {
             .ctx = undefined,
             .vk = &self.vk,
             .channels = platform_channel.Registry.init(),
-            .windowing_spike = config.windowing_spike,
         };
         errdefer {
             self.app.deinitViews();

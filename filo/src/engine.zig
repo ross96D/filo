@@ -328,14 +328,6 @@ pub const Engine = struct {
         return self;
     }
 
-    /// Send metrics for the implicit view, which every engine has.
-    ///
-    /// `width`/`height` are physical pixels; the embedder converts the window's
-    /// logical size before calling this.
-    pub fn sendWindowMetrics(self: *Engine, width: usize, height: usize, dpr: f64) void {
-        self.sendWindowMetricsForView(0, width, height, dpr, null);
-    }
-
     /// Send metrics for one view. `width`/`height` and the constraint values
     /// are physical pixels; `dpr` is physical pixels per logical pixel.
     pub fn sendWindowMetricsForView(

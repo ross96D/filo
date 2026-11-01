@@ -55,7 +55,6 @@ fn loadConfig(
         .vulkan_validation = env.get("FILO_VULKAN_VALIDATION") != null,
         .trace = env.get("FILO_TRACE") != null,
         .bootstrap_layer = env.get("FILO_LAYER_ONLY") != null,
-        .windowing_spike = env.get("FILO_WINDOWING_SPIKE") != null,
         .dart_entrypoint_args = dart_args,
     };
 }

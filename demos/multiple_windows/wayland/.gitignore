@@ -1,7 +1,4 @@
 .zig-cache/
 zig-out/
 zig-pkg/
-.filo/
-.filo-build/
-.env.local
 engine/

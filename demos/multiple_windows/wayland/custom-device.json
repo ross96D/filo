@@ -2,7 +2,7 @@
     "id": "filo_wayland",
     "label": "Filo Wayland",
     "sdkNameAndVersion": "Filo / Wayland (debug)",
-    "platform": "linux-x64",
+    "platform": "${platform}",
     "enabled": true,
     "ping": [
         "dart",
@@ -20,19 +20,12 @@
         "${engineRevision}"
     ],
     "install": [
-        "dart",
-        "wayland/tool/wayland.dart",
-        "install",
-        "${appName}",
-        "${localPath}"
+        "/bin/true"
     ],
     "uninstall": [
-        "dart",
-        "wayland/tool/wayland.dart",
-        "uninstall",
-        "${appName}"
+        "/bin/true"
     ],
     "runDebug": [
-        "wayland/zig-out/bin/${appName}"
+        "build/wayland/${arch}/debug/bundle/${appName}"
     ]
 }

@@ -7,12 +7,10 @@ class PostBuildCommand extends ToolCommand {
   String get name => 'post-build';
 
   @override
-  String get description =>
-      'Build the debug host and record the build manifest.';
+  String get description => 'Build the debug host and stage the bundle layout.';
 
   @override
-  String get invocation =>
-      'dart wayland/tool/wayland.dart post-build <appName> <localPath> '
+  String get invocation => 'dart wayland/tool/wayland.dart post-build <appName> <localPath> '
       '<buildMode> <icuDataPath> <engineRevision>';
 
   @override
@@ -27,7 +25,7 @@ class PostBuildCommand extends ToolCommand {
     final icuDataPath = args[3].isEmpty ? null : args[3];
 
     // Custom devices only invoke this hook for debug builds. Fail clearly
-    // instead of silently producing a debug host and a release-less manifest
+    // instead of silently producing a debug host and a release-less bundle
     // if Flutter ever starts calling it with another mode.
     if (buildMode != 'debug') {
       throw ToolError(
@@ -43,17 +41,11 @@ class PostBuildCommand extends ToolCommand {
       missingMessage: 'zig is not on PATH',
     );
 
-    final host = File('${tool.paths.hostDir}/$appName');
-    if (!host.existsSync()) {
-      throw ToolError('zig build did not create ${host.path}');
-    }
-
-    final manifest = tool.resolveLaunch(
+    final bundle = tool.stageDebugBundle(
       appName: appName,
-      localPath: localPath,
-      icuOverride: icuDataPath,
+      assets: localPath,
+      icu: icuDataPath,
     );
-    writeJson(tool.paths.launchBuildFile, manifest);
-    stdout.writeln('$toolName: wrote ${tool.paths.launchBuildFile}');
+    stdout.writeln('$toolName: staged $bundle');
   }
 }

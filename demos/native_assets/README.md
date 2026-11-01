@@ -71,8 +71,14 @@ demos/native_assets/build/wayland/x64/debug/bundle/
 
 ```sh
 cd demos/native_assets
-cp wayland/.env.local.example wayland/.env.local
-# edit FILO_ENGINE_LIB
+
+# Provide the debug engine and ICU data, or export FILO_ENGINE_LIB and
+# FILO_ICU_DATA when running Flutter.
+mkdir -p wayland/engine/debug wayland/engine/common
+ln -s ../../../../../filo/flutter-engine/debug/libflutter_engine.so \
+  wayland/engine/debug/libflutter_engine.so
+ln -s ../../../../../filo/flutter-engine/shared/icudtl.dat \
+  wayland/engine/common/icudtl.dat
 
 # once per machine
 dart wayland/tool/wayland.dart register-device
@@ -80,16 +86,17 @@ dart wayland/tool/wayland.dart register-device
 flutter run -d filo_wayland
 ```
 
-The `postBuild` and `install` hooks refresh the debug bundle and write
-`wayland/.filo/launch.json`. `runDebug` still launches the host from
-`wayland/zig-out/bin/`, but the host loads the engine, assets and ICU data from
-the bundle.
+The `postBuild` hook stages a debug bundle under
+`build/wayland/<arch>/debug/bundle/`. `runDebug` launches the host from that
+bundle, and the host resolves the engine, assets and ICU data relative to
+itself. There is no launch manifest or `.env.local` step.
 
 ## Release
 
 ```sh
 cd demos/native_assets
-# set FILO_ENGINE_LIB_RELEASE in wayland/.env.local
+# place a release engine at wayland/engine/release/libflutter_engine.so,
+# or set FILO_ENGINE_LIB_RELEASE
 dart wayland/tool/wayland.dart build-release
 build/wayland/x64/release/bundle/native_assets_demo
 ```

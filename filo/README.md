@@ -81,14 +81,13 @@ it is enough.
 | `trace`             | Print per-frame synchronization timings                                  |
 | `bootstrap_layer`   | Bootstrap implicit view 0 as a layer instead of an xdg_toplevel          |
 | `bootstrap_layer_surface` | Layer/anchors/margins/size/namespace for that surface (see below) |
-| `windowing_spike`   | Exercise the exported windowing ABI from the event loop                  |
 | `engine_args`       | Extra engine switches supplied by the host                               |
 | `dart_entrypoint_args` | Arguments for Dart's `main(List<String> args)`                       |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
-`FORCE_IMPELLER`, `FILO_VULKAN_VALIDATION`, `FILO_TRACE`, `FILO_LAYER_ONLY` and
-`FILO_WINDOWING_SPIKE`. A host with its own configuration can build a `Config`
+`FORCE_IMPELLER`, `FILO_VULKAN_VALIDATION`, `FILO_TRACE` and
+`FILO_LAYER_ONLY`. A host with its own configuration can build a `Config`
 directly.
 
 `engine_args` is a host-facing field. The switches Flutter passes to a custom

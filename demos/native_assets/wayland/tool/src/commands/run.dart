@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:args/args.dart';
+import 'package:path/path.dart' as p;
 
 import '../tool.dart';
 
@@ -14,7 +15,7 @@ class RunCommand extends ToolCommand {
   String get name => 'run';
 
   @override
-  String get description => 'Refresh the launch manifest and run the host.';
+  String get description => 'Stage the debug bundle and run the host.';
 
   @override
   String get invocation => 'dart wayland/tool/wayland.dart run [dart arguments...]';
@@ -25,30 +26,15 @@ class RunCommand extends ToolCommand {
   @override
   Future<void> run() async {
     final args = argResults!.rest;
-    final buildManifest = readManifest(tool.paths.launchBuildFile);
-    final installedManifest = readManifest(tool.paths.launchFile);
-    final fallback = installedManifest ?? buildManifest;
-    final appName = fallback.fieldStr('app_name') ?? 'app';
-    ;
-    // A manifest with an AOT snapshot is a release build: keep the paths it
-    // recorded instead of re-resolving them through the debug FILO_* values.
-    final manifest = fallback.fieldStr('aot') == null
-        ? tool.resolveLaunch(appName: appName, fallback: fallback)
-        : tool.launchManifest(
-            appName: appName,
-            engine: fallback.fieldRequire('engine', 'the launch manifest has no engine path'),
-            icu: fallback.fieldRequire('icu', 'the launch manifest has no ICU data path'),
-            assets: fallback.fieldRequire('assets', 'the launch manifest has no assets path'),
-            aot: fallback.fieldStr('aot'),
-            fallback: fallback,
-          );
-    writeJson(tool.paths.launchFile, manifest);
-
-    final host = tool.resolveHost(appName);
-    await startAndWait(host, args, workingDirectory: tool.paths.appRoot);
+    final appName = tool.appName();
+    final bundle = tool.stageDebugBundle(appName: appName);
+    await startAndWait(
+      p.join(bundle, appName),
+      args,
+      workingDirectory: tool.paths.appRoot,
+    );
   }
 }
-
 
 Future<void> startAndWait(
   String executable,

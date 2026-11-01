@@ -21,12 +21,18 @@ class RegisterDeviceCommand extends ToolCommand {
     if (!customDevice.existsSync()) {
       throw ToolError('${customDevice.path} not found');
     }
-    final json = customDevice.readAsStringSync();
+    final json = customDevice
+        .readAsStringSync()
+        .replaceAll(r'${arch}', tool.hostArch())
+        .replaceAll(r'${platform}', tool.hostTargetPlatform());
 
-    await runQuiet('flutter', [
-      'config',
-      '--enable-custom-devices',
-    ], workingDirectory: tool.paths.appRoot);
+    await runQuiet(
+        'flutter',
+        [
+          'config',
+          '--enable-custom-devices',
+        ],
+        workingDirectory: tool.paths.appRoot);
     // `custom-devices add` appends, so drop an older entry with the same id.
     await runQuiet(
       'flutter',
@@ -42,7 +48,6 @@ class RegisterDeviceCommand extends ToolCommand {
     );
   }
 }
-
 
 Future<void> runQuiet(
   String executable,

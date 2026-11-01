@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
 import 'package:args/command_runner.dart';
+import 'package:path/path.dart' as p;
 
 /// The prefix used for all tool output.
 const toolName = 'filo-wayland';
@@ -23,12 +23,8 @@ class ToolPaths {
   final String waylandDir;
 
   String get hostDir => '$waylandDir/zig-out/bin';
-  String get buildDir => '$appRoot/build/wayland';
-  String get releaseDir => '$buildDir/release';
-  String get defaultDistDir => '$buildDir/dist';
-  String get launchBuildFile => '$waylandDir/.filo-build/launch.json';
-  String get launchFile => '$waylandDir/.filo/launch.json';
-  String get dotenvFile => '$waylandDir/.env.local';
+  String buildDir(String arch, String mode) => '$appRoot/build/wayland/$arch/$mode';
+  String defaultBundleDir(String arch, String mode) => '${buildDir(arch, mode)}/bundle';
   String get customDeviceFile => '$waylandDir/custom-device.json';
 
   static ToolPaths discover() {
@@ -70,176 +66,6 @@ class ToolPaths {
   }
 }
 
-String resolvePath(String path, String base) {
-  final absolute = path.startsWith('/') ? path : '$base/$path';
-  return Uri.file(absolute).normalizePath().toFilePath();
-}
-
-String? resolveOptionalPath(String? path, String base) {
-  if (path == null || path.isEmpty) return null;
-  return resolvePath(path, base);
-}
-
-Map<String, Object?>? readManifest(String path) {
-  final file = File(path);
-  if (!file.existsSync()) return null;
-  final Object? decoded;
-  try {
-    decoded = jsonDecode(file.readAsStringSync());
-  } on FormatException catch (error) {
-    throw ToolError('$path: ${error.message}');
-  }
-  if (decoded is! Map<String, dynamic>) {
-    throw ToolError('$path: expected a JSON object');
-  }
-  return decoded;
-}
-
-void writeJson(String path, Map<String, Object?> value) {
-  final file = File(path);
-  file.parent.createSync(recursive: true);
-  file.writeAsStringSync(
-    '${const JsonEncoder.withIndent('  ').convert(value)}\n',
-  );
-}
-
-String? stringField(Map<String, Object?>? map, String key) {
-  final value = map?[key];
-  return value is String && value.isNotEmpty ? value : null;
-}
-
-bool boolField(Map<String, Object?>? map, String key) => map?[key] == true;
-
-List<String>? stringListField(Map<String, Object?>? map, String key) {
-  final value = map?[key];
-  if (value is! List) return null;
-  return [
-    for (final item in value)
-      if (item is String) item,
-  ];
-}
-
-String requireValue(String? value, String message) {
-  if (value == null) throw ToolError(message);
-  return value;
-}
-
-/// Parse `wayland/.env.local`.
-///
-/// Supports `KEY=VALUE`, comments, single/double quoted values and `$'...'`
-/// escapes. Variable expansion and command substitution are rejected.
-Map<String, String> readDotEnv(String path) {
-  final file = File(path);
-  if (!file.existsSync()) return const {};
-  final values = <String, String>{};
-  final lines = file.readAsLinesSync();
-  for (var index = 0; index < lines.length; index++) {
-    final location = '$path:${index + 1}';
-    var line = lines[index].trim();
-    if (line.isEmpty || line.startsWith('#')) continue;
-    if (line.startsWith('export ')) {
-      line = line.substring('export '.length).trimLeft();
-    }
-    final equals = line.indexOf('=');
-    if (equals <= 0) {
-      throw ToolError('$location: expected KEY=VALUE');
-    }
-    final key = line.substring(0, equals).trim();
-    if (!_envKey.hasMatch(key)) {
-      throw ToolError('$location: invalid variable name "$key"');
-    }
-    final raw = line.substring(equals + 1).trim();
-    values[key] = _parseDotEnvValue(raw, location);
-  }
-  return values;
-}
-
-final _envKey = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
-final _shellExpansion = RegExp(r'\$[A-Za-z_{(]');
-
-String _parseDotEnvValue(String raw, String location) {
-  if (raw.isEmpty) return '';
-  if (raw.startsWith(r"$'")) {
-    if (raw.length < 3 || !raw.endsWith("'")) {
-      throw ToolError("$location: unterminated \$'...' value");
-    }
-    return _parseAnsiC(raw.substring(2, raw.length - 1), location);
-  }
-  if (raw.startsWith("'")) {
-    if (raw.length < 2 || !raw.endsWith("'")) {
-      throw ToolError('$location: unterminated single-quoted value');
-    }
-    return raw.substring(1, raw.length - 1);
-  }
-  if (raw.startsWith('"')) {
-    if (raw.length < 2 || !raw.endsWith('"')) {
-      throw ToolError('$location: unterminated double-quoted value');
-    }
-    return _parseDoubleQuoted(raw.substring(1, raw.length - 1), location);
-  }
-  _rejectExpansion(raw, location);
-  return raw;
-}
-
-String _parseDoubleQuoted(String body, String location) {
-  _rejectExpansion(body, location);
-  final out = StringBuffer();
-  for (var index = 0; index < body.length; index++) {
-    final char = body[index];
-    if (char == r'\' &&
-        index + 1 < body.length &&
-        (body[index + 1] == '"' || body[index + 1] == r'\')) {
-      out.write(body[index + 1]);
-      index++;
-    } else {
-      out.write(char);
-    }
-  }
-  return out.toString();
-}
-
-String _parseAnsiC(String body, String location) {
-  final out = StringBuffer();
-  for (var index = 0; index < body.length; index++) {
-    final char = body[index];
-    if (char != r'\') {
-      out.write(char);
-      continue;
-    }
-    index++;
-    if (index >= body.length) {
-      throw ToolError("$location: trailing backslash in \$'...' value");
-    }
-    switch (body[index]) {
-      case 'n':
-        out.write('\n');
-      case 'r':
-        out.write('\r');
-      case 't':
-        out.write('\t');
-      case r'\':
-        out.write(r'\');
-      case "'":
-        out.write("'");
-      case '"':
-        out.write('"');
-      default:
-        throw ToolError(
-          "$location: unknown escape \"\\${body[index]}\" in \$'...' value",
-        );
-    }
-  }
-  return out.toString();
-}
-
-void _rejectExpansion(String value, String location) {
-  if (value.contains('`') || _shellExpansion.hasMatch(value)) {
-    throw ToolError(
-      '$location: shell expansion is not supported; use a literal value',
-    );
-  }
-}
-
 Future<void> runInherited(
   String executable,
   List<String> arguments, {
@@ -265,73 +91,6 @@ Future<void> runInherited(
   }
 }
 
-Future<void> runQuiet(
-  String executable,
-  List<String> arguments, {
-  required String workingDirectory,
-  bool allowFailure = false,
-}) async {
-  final ProcessResult result;
-  try {
-    result = await Process.run(
-      executable,
-      arguments,
-      workingDirectory: workingDirectory,
-    );
-  } on ProcessException {
-    throw ToolError('$executable is not on PATH');
-  }
-  if (result.exitCode == 0 || allowFailure) return;
-  final output = '${result.stdout}${result.stderr}'.trim();
-  throw ToolError(
-    '$executable ${arguments.join(' ')} failed with exit code '
-    '${result.exitCode}${output.isEmpty ? '' : ':\n$output'}',
-  );
-}
-
-Future<void> startAndWait(
-  String executable,
-  List<String> arguments, {
-  required String workingDirectory,
-}) async {
-  final Process process;
-  try {
-    process = await Process.start(
-      executable,
-      arguments,
-      workingDirectory: workingDirectory,
-      mode: ProcessStartMode.inheritStdio,
-    );
-  } on ProcessException {
-    throw ToolError('failed to run $executable');
-  }
-
-  final subscriptions = <StreamSubscription<ProcessSignal>>[];
-  void forward(ProcessSignal signal) {
-    try {
-      subscriptions.add(
-        signal.watch().listen((_) {
-          process.kill(signal);
-        }),
-      );
-    } on SignalException {
-      // Signal is not supported on this platform; ignore it.
-    }
-  }
-
-  forward(ProcessSignal.sigterm);
-  forward(ProcessSignal.sigint);
-  forward(ProcessSignal.sighup);
-
-  final code = await process.exitCode;
-  for (final subscription in subscriptions) {
-    await subscription.cancel();
-  }
-  if (code != 0) {
-    exitCode = code < 0 ? 128 - code : code;
-  }
-}
-
 void copyTree(Directory source, Directory destination) {
   destination.createSync(recursive: true);
   for (final entity in source.listSync(recursive: true, followLinks: true)) {
@@ -347,6 +106,23 @@ void copyTree(Directory source, Directory destination) {
   }
 }
 
+void clearDirectory(Directory directory) {
+  if (!directory.existsSync()) {
+    directory.createSync(recursive: true);
+    return;
+  }
+  for (final entity in directory.listSync(followLinks: false)) {
+    File(entity.path).deleteSync(recursive: true);
+  }
+}
+
+void replaceLink(String linkPath, String target) {
+  try {
+    File(linkPath).deleteSync(recursive: true);
+  } catch (_) {}
+  Link(linkPath).createSync(target);
+}
+
 void makeExecutable(String path) {
   final result = Process.runSync('chmod', ['755', path]);
   if (result.exitCode != 0) {
@@ -354,147 +130,140 @@ void makeExecutable(String path) {
   }
 }
 
-void writeLauncher(String path, String appName) {
-  File(path).writeAsStringSync(
-    '#!/bin/sh\n'
-    'set -eu\n'
-    'cd "\$(dirname "\$0")"\n'
-    'exec "./bin/$appName" "\$@"\n',
-  );
-  makeExecutable(path);
-}
-
-/// Shared state for the commands: paths, `.env.local`, manifests and release
-/// path resolution.
+/// Shared state for the commands: paths, environment and bundle staging.
 class Tool {
   Tool(this.paths);
 
   final ToolPaths paths;
 
-  late final Map<String, String> _dotenv = readDotEnv(paths.dotenvFile);
-
   static Tool discover() => Tool(ToolPaths.discover());
 
-  String? setting(String key) => Platform.environment[key] ?? _dotenv[key];
-
-  String? pathSetting(String key) {
-    final value = setting(key);
-    if (value == null || value.isEmpty) return null;
-    return resolvePath(value, paths.waylandDir);
+  String? env(String key) {
+    final value = Platform.environment[key];
+    return value == null || value.isEmpty ? null : value;
   }
 
-  bool flag(String key, {required bool fallback}) {
-    final value = setting(key);
-    if (value == null) return fallback;
-    return value.isNotEmpty;
-  }
-
-  List<String>? dartArgsSetting() {
-    final value = setting('FILO_DART_ENTRYPOINT_ARGS');
+  String? pathEnv(String key) {
+    final value = env(key);
     if (value == null) return null;
-    if (value.isEmpty) return <String>[];
-    final lines = value.split('\n');
-    if (lines.isNotEmpty && lines.last.isEmpty) lines.removeLast();
-    return [
-      for (final line in lines)
-        if (line.endsWith('\r')) line.substring(0, line.length - 1) else line,
-    ];
+    return p.isAbsolute(value) ? p.normalize(value) : p.join(paths.waylandDir, value);
   }
 
-  Map<String, Object?> resolveLaunch({
+  String _resolveAppPath(String value) {
+    return p.isAbsolute(value) ? p.normalize(value) : p.join(paths.appRoot, value);
+  }
+
+  String localEngine(String mode) {
+    return p.join(paths.waylandDir, 'engine', mode, 'libflutter_engine.so');
+  }
+
+  String get localIcu => p.join(paths.waylandDir, 'engine', 'common', 'icudtl.dat');
+
+  String get defaultAssets => p.join(paths.appRoot, 'build', 'flutter_assets');
+
+  String debugEngineSource() => pathEnv('FILO_ENGINE_LIB') ?? localEngine('debug');
+
+  String releaseEngineSource() => pathEnv('FILO_ENGINE_LIB_RELEASE') ?? localEngine('release');
+
+  String assetsSource({String? hookPath}) {
+    final override = pathEnv('FILO_ASSETS');
+    if (override != null) return override;
+    if (hookPath != null && hookPath.isNotEmpty) return _resolveAppPath(hookPath);
+    return defaultAssets;
+  }
+
+  String icuSource({String? hookPath}) {
+    final override = pathEnv('FILO_ICU_DATA');
+    if (override != null) return override;
+    if (hookPath != null && hookPath.isNotEmpty) return _resolveAppPath(hookPath);
+    return localIcu;
+  }
+
+  /// Copy the host and stage the engine, ICU data and assets next to it:
+  ///
+  /// `build/wayland/<arch>/debug/bundle/<appName>`
+  /// `build/wayland/<arch>/debug/bundle/lib/libflutter_engine.so`
+  /// `build/wayland/<arch>/debug/bundle/data/icudtl.dat`
+  /// `build/wayland/<arch>/debug/bundle/data/flutter_assets`
+  ///
+  /// The executable is copied, not symlinked, because the host derives the
+  /// bundle root from its own path.
+  String stageDebugBundle({
     required String appName,
-    String? localPath,
-    String? icuOverride,
-    Map<String, Object?>? fallback,
+    String? assets,
+    String? icu,
   }) {
-    final engine = requireValue(
-      pathSetting('FILO_ENGINE_LIB') ??
-          stringField(fallback, 'engine') ??
-          localEngine(),
-      'FILO_ENGINE_LIB is not set; add it to wayland/.env.local',
-    );
-    final icu = requireValue(
-      pathSetting('FILO_ICU_DATA') ??
-          resolveOptionalPath(icuOverride, paths.appRoot) ??
-          stringField(fallback, 'icu'),
-      'no Flutter ICU data path; run post-build or set FILO_ICU_DATA',
-    );
-    final assets = requireValue(
-      pathSetting('FILO_ASSETS') ??
-          resolveOptionalPath(localPath, paths.appRoot) ??
-          stringField(fallback, 'assets') ??
-          defaultAssets(),
-      'no flutter_assets directory; run install or set FILO_ASSETS',
-    );
-    final aot = pathSetting('FILO_AOT_LIB') ?? stringField(fallback, 'aot');
+    final root = paths.defaultBundleDir(hostArch(), 'debug');
+    final libDir = Directory(p.join(root, 'lib'))..createSync(recursive: true);
+    final dataDir = Directory(p.join(root, 'data'))..createSync(recursive: true);
+    clearDirectory(libDir);
+    clearDirectory(dataDir);
 
-    return launchManifest(
-      appName: appName,
-      engine: engine,
-      icu: icu,
-      assets: assets,
-      aot: aot,
-      fallback: fallback,
-    );
-  }
-
-  Map<String, Object?> launchManifest({
-    required String appName,
-    required String engine,
-    required String icu,
-    required String assets,
-    String? aot,
-    Map<String, Object?>? fallback,
-  }) {
-    return {
-      'app_name': appName,
-      'engine': engine,
-      'icu': icu,
-      'assets': assets,
-      'aot': aot,
-      'dart_args':
-          dartArgsSetting() ??
-          stringListField(fallback, 'dart_args') ??
-          <String>[],
-      'force_impeller': flag(
-        'FORCE_IMPELLER',
-        fallback: boolField(fallback, 'force_impeller'),
-      ),
-      'vulkan_validation': flag(
-        'FILO_VULKAN_VALIDATION',
-        fallback: boolField(fallback, 'vulkan_validation'),
-      ),
-      'trace': flag('FILO_TRACE', fallback: boolField(fallback, 'trace')),
-      'layer_only': flag(
-        'FILO_LAYER_ONLY',
-        fallback: boolField(fallback, 'layer_only'),
-      ),
-      'windowing_spike': flag(
-        'FILO_WINDOWING_SPIKE',
-        fallback: boolField(fallback, 'windowing_spike'),
-      ),
-    };
-  }
-
-  String resolveHost(String appName) {
-    for (final candidate in [appName, 'app']) {
-      final file = File('${paths.hostDir}/$candidate');
-      if (file.existsSync()) return file.path;
+    final host = File(p.join(paths.hostDir, appName));
+    if (!host.existsSync()) {
+      throw ToolError(
+        'host executable not found at ${host.path}; run "zig build" in wayland/',
+      );
     }
-    throw ToolError(
-      'host executable not found in ${paths.hostDir}; run "zig build" in '
-      'wayland/',
+    final stagedHost = p.join(root, appName);
+    host.copySync(stagedHost);
+    makeExecutable(stagedHost);
+
+    final engine = File(debugEngineSource());
+    if (!engine.existsSync()) {
+      throw ToolError(
+        'debug engine not found at ${engine.path}; set FILO_ENGINE_LIB or '
+        'place the engine at ${localEngine('debug')}',
+      );
+    }
+    replaceLink(
+      p.join(libDir.path, 'libflutter_engine.so'),
+      p.absolute(engine.resolveSymbolicLinksSync()),
     );
+
+    final assetsDir = Directory(assetsSource(hookPath: assets));
+    if (!assetsDir.existsSync()) {
+      throw ToolError(
+        'flutter_assets not found at ${assetsDir.path}; set FILO_ASSETS or '
+        'build the app first',
+      );
+    }
+    final resolvedAssets = assetsDir.resolveSymbolicLinksSync();
+
+    final nativeDir = nativeAssetsDir(resolvedAssets);
+    if (nativeDir != null) {
+      for (final entity in nativeDir.listSync(followLinks: true)) {
+        if (entity is File && entity.path.endsWith('.so')) {
+          entity.copySync(p.join(libDir.path, p.basename(entity.path)));
+        }
+      }
+    }
+
+    final icuFile = File(icuSource(hookPath: icu));
+    if (!icuFile.existsSync()) {
+      throw ToolError(
+        'ICU data not found at ${icuFile.path}; set FILO_ICU_DATA or place '
+        'icudtl.dat at ${localIcu}',
+      );
+    }
+    replaceLink(
+      p.join(dataDir.path, 'icudtl.dat'),
+      p.absolute(icuFile.resolveSymbolicLinksSync()),
+    );
+    replaceLink(p.join(dataDir.path, 'flutter_assets'), p.absolute(resolvedAssets));
+
+    return root;
   }
 
-  String? localEngine() {
-    final file = File('${paths.waylandDir}/engine/libflutter_engine.so');
-    return file.existsSync() ? file.path : null;
-  }
-
-  String? defaultAssets() {
-    final directory = Directory('${paths.appRoot}/build/flutter_assets');
-    return directory.existsSync() ? directory.path : null;
+  Directory? nativeAssetsDir(String assets) {
+    for (final candidate in [
+      p.join(assets, 'native_assets', 'linux'),
+      p.join(assets, '..', 'native_assets', 'linux'),
+    ]) {
+      final directory = Directory(candidate);
+      if (directory.existsSync()) return directory;
+    }
+    return null;
   }
 
   String appName() {
@@ -525,70 +294,30 @@ class Tool {
     }
   }
 
-  String releaseEngine() {
-    final configured = pathSetting('FILO_ENGINE_LIB_RELEASE');
-    if (configured != null) {
-      if (!File(configured).existsSync()) {
-        throw ToolError(
-          'FILO_ENGINE_LIB_RELEASE points to a missing file: $configured',
-        );
-      }
-      return configured;
+  String hostArch() {
+    switch (Abi.current().toString()) {
+      case 'linux_x64':
+        return 'x64';
+      case 'linux_arm64':
+        return 'arm64';
+      case 'linux_riscv64':
+        return 'riscv64';
+      default:
+        throw ToolError('unsupported host architecture');
     }
-    final local = File(
-      '${paths.waylandDir}/engine/release/libflutter_engine.so',
-    );
-    if (local.existsSync()) return local.path;
-    throw ToolError(
-      'no release engine; set FILO_ENGINE_LIB_RELEASE in wayland/.env.local '
-      'to a release-built libflutter_engine.so',
-    );
   }
 
-  String releaseIcu(String targetPlatform) {
-    final buildManifest = readManifest(paths.launchBuildFile);
-    final installedManifest = readManifest(paths.launchFile);
-    final candidates = <String?>[
-      pathSetting('FILO_ICU_DATA'),
-      stringField(buildManifest, 'icu'),
-      stringField(installedManifest, 'icu'),
-      '${paths.waylandDir}/engine/icudtl.dat',
-      flutterIcu(targetPlatform),
-    ];
-    for (final candidate in candidates) {
-      if (candidate == null || candidate.isEmpty) continue;
-      if (File(candidate).existsSync()) return candidate;
+  String archForTargetPlatform(String targetPlatform) {
+    switch (targetPlatform) {
+      case 'linux-x64':
+        return 'x64';
+      case 'linux-arm64':
+        return 'arm64';
+      case 'linux-riscv64':
+        return 'riscv64';
+      default:
+        throw ToolError('unsupported target platform $targetPlatform');
     }
-    throw ToolError(
-      'no Flutter ICU data; set FILO_ICU_DATA in wayland/.env.local or run a '
-      "debug build once so post-build records Flutter's icuDataPath",
-    );
-  }
-
-  String? flutterIcu(String targetPlatform) {
-    final ProcessResult result;
-    try {
-      result = Process.runSync('flutter', ['--version', '--machine']);
-    } on ProcessException {
-      return null;
-    }
-    if (result.exitCode != 0 || result.stdout is! String) return null;
-    final Object? decoded;
-    try {
-      decoded = jsonDecode(result.stdout as String);
-    } on FormatException {
-      return null;
-    }
-    if (decoded is! Map<String, dynamic>) return null;
-    final root = decoded['flutterRoot'];
-    if (root is! String || root.isEmpty) return null;
-    for (final platform in {targetPlatform, 'linux-x64'}) {
-      final file = File(
-        '$root/bin/cache/artifacts/engine/$platform/icudtl.dat',
-      );
-      if (file.existsSync()) return file.path;
-    }
-    return null;
   }
 }
 

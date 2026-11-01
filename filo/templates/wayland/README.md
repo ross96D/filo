@@ -36,7 +36,6 @@ Environment variables override the defaults:
 | `FILO_VULKAN_VALIDATION` | Enable the Vulkan validation layer |
 | `FILO_TRACE` | Print per-frame synchronization timings |
 | `FILO_LAYER_ONLY` | Bootstrap the implicit view as a layer surface |
-| `FILO_WINDOWING_SPIKE` | Exercise the windowing ABI from the event loop |
 
 Relative paths in the tool's override variables resolve against `wayland/`.
 

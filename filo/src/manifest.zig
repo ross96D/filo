@@ -43,8 +43,6 @@ pub const Config = struct {
     /// The layer surface created for the implicit view when [bootstrap_layer]
     /// is true. The first layer controller should use the same values.
     bootstrap_layer_surface: LayerBootstrap = .{},
-    /// Exercise the exported windowing ABI from the event loop.
-    windowing_spike: bool = false,
     /// Extra engine switches supplied by the host. Flutter's custom-device
     /// `${engineOptions}` are not forwarded yet. The strings are borrowed until
     /// `Runtime.init` returns; the runtime does not keep them.
@@ -69,7 +67,6 @@ pub const Config = struct {
             // Development-runner switch for the layer-only demo. Hosts should
             // construct Config directly when they need this.
             .bootstrap_layer = map.get("FILO_LAYER_ONLY") != null,
-            .windowing_spike = map.get("FILO_WINDOWING_SPIKE") != null,
         };
     }
 };
