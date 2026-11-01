@@ -267,7 +267,7 @@ class Tool {
   }) {
     final engine = File(
       require(
-        pathEnv('FILO_ENGINE_LIB') ?? fallback.fieldStr('engine') ?? localEngine(),
+        pathEnv('FILO_ENGINE_LIB') ?? fallback.fieldStr('engine') ?? localEngine('debug'),
         'FILO_ENGINE_LIB is not set; add it to wayland/.env.local',
       ),
     ).resolveSymbolicLinksSync();
@@ -345,8 +345,8 @@ class Tool {
     }
     var engineSource = File(engine).resolveSymbolicLinksSync();
     if (p.equals(engineSource, enginePath)) {
-      final fallback = localEngine();
-      if (fallback == null) {
+      final fallback = localEngine('debug');
+      if (!File(fallback).existsSync()) {
         throw ToolError(
           'the launch manifest points the engine at the bundle itself; '
           'set FILO_ENGINE_LIB',
@@ -448,9 +448,8 @@ class Tool {
     );
   }
 
-  String? localEngine() {
-    final file = File('${paths.waylandDir}/engine/libflutter_engine.so');
-    return file.existsSync() ? file.path : null;
+  String localEngine(String mode) {
+    return p.join(paths.waylandDir, 'engine', mode, 'libflutter_engine.so');
   }
 
   String? defaultAssets() {
