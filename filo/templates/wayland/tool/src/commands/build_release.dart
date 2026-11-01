@@ -75,10 +75,10 @@ class BuildReleaseCommand extends ToolCommand {
     final targetPlatform = (results['target-platform'] as String?) ?? tool.hostTargetPlatform();
     final arch = tool.archForTargetPlatform(targetPlatform);
     final optimize = _zigOptimize[results['optimize'] as String]!;
-    final distDir = p.join(
-      tool.paths.appRoot,
-      (results['dist'] as String?) ?? tool.paths.defaultBundleDir(arch, "release"),
-    );
+    final dist = results['dist'] as String?;
+    final distDir = dist == null
+        ? tool.paths.defaultBundleDir(arch, 'release')
+        : p.join(tool.paths.appRoot, dist);
     final dartDefines = results['dart-define'] as List<String>;
     final dartDefineFiles = results['dart-define-from-file'] as List<String>;
     final encodedDefines = _encodeDefines(
@@ -98,17 +98,20 @@ class BuildReleaseCommand extends ToolCommand {
 
     // Resolve the engine and ICU data first so a missing prerequisite fails
     // before the expensive Flutter build.
-    final engine = tool.env('FILO_ENGINE_LIB_RELEASE') ??
-        p.join(tool.paths.waylandDir, 'engine/release/libflutter_engine.so');
+    final engine = tool.releaseEngineSource();
     if (!File(engine).existsSync()) {
       throw ToolError(
-        'release engine file not found in $engine; '
-        'set FILO_ENGINE_LIB_RELEASE in wayland/.env.local '
-        'to a release-built libflutter_engine.so or copy one to '
-        '${p.join(tool.paths.waylandDir, 'engine/release/libflutter_engine.so')}',
+        'release engine not found at $engine; set FILO_ENGINE_LIB_RELEASE or '
+        'place one at ${tool.localEngine('release')}',
       );
     }
-    final icu = tool.releaseIcu(targetPlatform);
+    final icu = tool.pathEnv('FILO_ICU_DATA') ?? tool.localIcu;
+    if (!File(icu).existsSync()) {
+      throw ToolError(
+        'ICU data not found at $icu; set FILO_ICU_DATA or place icudtl.dat at '
+        '${tool.localIcu}',
+      );
+    }
 
     // `flutter assemble` only writes the outputs it is asked for; remove the
     // directory so a previous debug bundle cannot leave kernel_blob.bin or
@@ -165,12 +168,13 @@ class BuildReleaseCommand extends ToolCommand {
     if (bundleDir.existsSync()) {
       bundleDir.deleteSync(recursive: true);
     }
-    final binDir = Directory('${bundleDir.path}/bin')..createSync(recursive: true);
+    bundleDir.createSync(recursive: true);
     final libDir = Directory('${bundleDir.path}/lib')..createSync(recursive: true);
     final dataDir = Directory('${bundleDir.path}/data')..createSync(recursive: true);
 
-    host.copySync('${binDir.path}/$appName');
-    makeExecutable('${binDir.path}/$appName');
+    final stagedHost = '${bundleDir.path}/$appName';
+    host.copySync(stagedHost);
+    makeExecutable(stagedHost);
 
     File(engine).copySync('${libDir.path}/libflutter_engine.so');
     aot.copySync('${libDir.path}/libapp.so');
@@ -186,26 +190,8 @@ class BuildReleaseCommand extends ToolCommand {
       }
     }
 
-    stdout.writeln('$toolName: wrote ${tool.paths.launchFile}');
-
-    File('${bundleDir.path}/.filo/launch.json')
-      ..createSync(recursive: true)
-      ..writeAsStringSync(
-        const JsonEncoder.withIndent('  ').convert(
-          tool.launchManifest(
-            appName: appName,
-            engine: 'lib/libflutter_engine.so',
-            icu: 'data/icudtl.dat',
-            assets: 'data/flutter_assets',
-            aot: 'lib/libapp.so',
-          ),
-        ),
-      );
-    final launcher = '${bundleDir.path}/$appName';
-    writeLauncher(launcher, appName);
-
     stdout.writeln('$toolName: staged ${bundleDir.path}');
-    stdout.writeln('$toolName: launcher $launcher');
+    stdout.writeln('$toolName: run $stagedHost');
   }
 }
 

@@ -80,7 +80,8 @@ class SetupFiloCommand extends ToolCommand {
     if (withEngine) {
       var progress = _DownloadProgress('Downloading debug engine');
       final debugEngine = File('${tool.paths.waylandDir}/engine/debug/engine.debug.tar.xz');
-      downloadAndUntar(
+      debugEngine.createSync(recursive: true);
+      await downloadAndUntar(
         Uri.parse(
           "https://github.com/ross96D/flutter-ci/releases/download/engine%2Fdeb287481e3ce9468f3434937ced4240a70539ca/engine.debug.tar.xz",
         ),
@@ -93,7 +94,8 @@ class SetupFiloCommand extends ToolCommand {
       progress = _DownloadProgress('Downloading release-small engine');
       final releaseSmallEngine =
           File('${tool.paths.waylandDir}/engine/release/engine.release-small.tar.xz');
-      downloadAndUntar(
+      releaseSmallEngine.createSync(recursive: true);
+      await downloadAndUntar(
         Uri.parse(
           "https://github.com/ross96D/flutter-ci/releases/download/engine%2Fdeb287481e3ce9468f3434937ced4240a70539ca/engine.release-small.tar.xz",
         ),
@@ -102,6 +104,19 @@ class SetupFiloCommand extends ToolCommand {
       );
       progress.done();
       releaseSmallEngine.deleteSync();
+
+      progress = _DownloadProgress('Downloading common files');
+      final common = File('${tool.paths.waylandDir}/engine/common/common.tar.xz');
+      common.createSync(recursive: true);
+      await downloadAndUntar(
+        Uri.parse(
+          "https://github.com/ross96D/flutter-ci/releases/download/engine%2Fdeb287481e3ce9468f3434937ced4240a70539ca/common.tar.xz",
+        ),
+        common,
+        progress.call,
+      );
+      progress.done();
+      common.deleteSync();
     }
   }
 }
@@ -254,7 +269,7 @@ Future<void> downloadAndUntar(
   final client = HttpClient();
   final request = await client.getUrl(url);
   request.followRedirects = true;
-  final response = await request.done;
+  final response = await request.close();
 
   final total = response.contentLength > 0 ? response.contentLength : null;
   var received = 0;
@@ -275,9 +290,9 @@ Future<void> downloadAndUntar(
     "tar",
     [
       "-C",
-      "${file.parent.path}",
+      file.parent.path,
       "-xf",
-      "${file.path}",
+      file.path,
     ],
     stderrEncoding: utf8,
   );

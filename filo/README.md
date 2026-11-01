@@ -172,6 +172,7 @@ The Wayland runner template therefore lays out a Flutter-style debug bundle:
 
 ```text
 build/wayland/<arch>/debug/bundle/
+├── <appName>
 ├── lib/
 │   ├── libflutter_engine.so -> <engine>
 │   └── libnative_sum.so
@@ -198,38 +199,36 @@ patchelf --add-rpath '$ORIGIN' /path/to/libflutter_engine.so
 ## Flutter custom devices
 
 For `flutter run -d <device>`, use the per-app runner template in
-[`templates/wayland/`](templates/wayland/README.md). The working example in this
-repository is `demos/multiple_windows/wayland/`. The template contains:
+[`templates/wayland/`](templates/wayland/README.md). The template contains:
 
 - a Zig host that imports `filo` and calls `filo.run`,
 - a Dart tool entrypoint, `tool/wayland.dart`, with one file per command under
-  `tool/src/commands/`, implementing the `postBuild`/`install`/`uninstall`/
-  `ping` hooks plus setup, release builds and device registration,
+  `tool/src/commands/`, implementing the `postBuild`/`ping` hooks plus setup,
+  release builds and device registration,
 - a `custom-device.json` whose `runDebug` starts the native host directly,
-- a launch manifest written by the hooks and read by the host.
+- a fixed bundle layout that the host reads relative to its own executable.
 
 Copy it into an app as `wayland/`, run
 `dart wayland/tool/wayland.dart setup-filo <url>` to assign the Zig package
-identity and fetch filo with a pinned hash, provide an engine path in
-`.env.local`, and register the device once with
-`dart wayland/tool/wayland.dart register-device`. The same global device entry
-works for every app that has a `wayland/` folder.
+identity and fetch filo with a pinned hash, place the engines under
+`wayland/engine/{debug,release}/` and ICU data at
+`wayland/engine/common/icudtl.dat`, then register the device once with
+`dart wayland/tool/wayland.dart register-device`. Registration writes the host
+architecture into the generated custom-device entry. The same global device
+entry works for every app that has a `wayland/` folder.
 
-`.env.local` is parsed by the Dart tool, not sourced by a shell; it supports
-`KEY=VALUE`, comments, quotes and `$'...'` escapes, but no variable expansion or
-command substitution.
+`FILO_ENGINE_LIB`, `FILO_ENGINE_LIB_RELEASE`, `FILO_ICU_DATA`, `FILO_ASSETS`
+and `FILO_AOT_LIB` override the default sources and paths.
 
 Flutter custom devices do not forward `--dart-entrypoint-args`; set
-`FILO_DART_ENTRYPOINT_ARGS` with one argument per line when running Flutter (or
-put it in `.env.local`). The post-build hook records it in the launch manifest.
+`FILO_DART_ENTRYPOINT_ARGS` with one argument per line when running Flutter.
 Engine switches from `${engineOptions}` are currently ignored.
 
 Flutter custom devices only support debug builds. For release, use the
 template's `build-release` command: it runs `flutter assemble` for the AOT
-snapshot, builds the host with `-Doptimize=ReleaseFast`, writes the launch
-manifest and stages a relocatable bundle in
-`build/wayland/<arch>/release/bundle/`. See the template README for the
-required `FILO_ENGINE_LIB_RELEASE` engine and the bundle layout.
+snapshot, builds the host with `-Doptimize=ReleaseFast`, and stages a
+relocatable bundle in `build/wayland/<arch>/release/bundle/`. See the template
+README for the required engine and the bundle layout.
 
 ## Development
 
@@ -241,8 +240,6 @@ zig build test     # unit tests
 zig build fmt      # format in place
 ```
 
-The repository root `run.sh` prepares a debug/release bundle under
-`<app>/build/wayland/<arch>/<mode>/bundle/`, sets the engine, ICU, asset and AOT
-paths, and runs the development runner. `FILO_ENGINE_LIB` /
-`FILO_ENGINE_LIB_RELEASE` override the engine source. For `flutter run`, use the
+The development runner reads `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`
+and `FILO_AOT_LIB` from the environment. For `flutter run`, use the
 custom-device template above.
