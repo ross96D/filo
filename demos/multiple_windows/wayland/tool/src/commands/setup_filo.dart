@@ -11,12 +11,8 @@ const filoUrl = "git+https://github.com/ross96d/filo#master";
 
 class SetupFiloCommand extends ToolCommand {
   final _argParser = ArgParser()
-    ..addFlag(
-      'check',
-      negatable: false,
-      help: 'Run a fast build-graph check after fetching.',
-    )
-    ..addFlag('with-engine', help: 'Download the engines');
+    ..addFlag('check', negatable: false, help: 'Run a fast build-graph check after fetching.')
+    ..addFlag('with-engine', help: 'Download the engines', defaultsTo: true);
 
   @override
   String get name => 'setup-filo';
@@ -42,9 +38,7 @@ class SetupFiloCommand extends ToolCommand {
 
     final before = _ensureIdentity(manifest, tool.appName());
     if (before.changed) {
-      stdout.writeln(
-        '$toolName: package ${before.name}, fingerprint 0x${before.fingerprint}',
-      );
+      stdout.writeln('$toolName: package ${before.name}, fingerprint 0x${before.fingerprint}');
     }
 
     final zigPkgDir = Directory(p.join(tool.paths.waylandDir, "zig-pkg"));
@@ -59,13 +53,9 @@ class SetupFiloCommand extends ToolCommand {
       );
 
       final after = _ensureIdentity(manifest, tool.appName());
-      stdout.writeln(
-        '$toolName: package ${after.name}, fingerprint 0x${after.fingerprint}',
-      );
+      stdout.writeln('$toolName: package ${after.name}, fingerprint 0x${after.fingerprint}');
       final fetched = manifest.readAsStringSync();
-      final hash = RegExp(
-        r'\.hash\s*=\s*"([^"]+)"',
-      ).firstMatch(fetched)?.group(1);
+      final hash = RegExp(r'\.hash\s*=\s*"([^"]+)"').firstMatch(fetched)?.group(1);
       if (hash != null) {
         stdout.writeln('$toolName: hash $hash');
       }
@@ -92,8 +82,9 @@ class SetupFiloCommand extends ToolCommand {
       debugEngine.deleteSync();
 
       progress = _DownloadProgress('Downloading release-small engine');
-      final releaseSmallEngine =
-          File('${tool.paths.waylandDir}/engine/release/engine.release-small.tar.xz');
+      final releaseSmallEngine = File(
+        '${tool.paths.waylandDir}/engine/release/engine.release-small.tar.xz',
+      );
       releaseSmallEngine.createSync(recursive: true);
       await downloadAndUntar(
         Uri.parse(
@@ -124,20 +115,14 @@ class SetupFiloCommand extends ToolCommand {
 Future<void> _checkBuildGraph(String waylandDir) async {
   final ProcessResult result;
   try {
-    result = await Process.run(
-      'zig',
-      ['build', '--help'],
-      workingDirectory: waylandDir,
-    );
+    result = await Process.run('zig', ['build', '--help'], workingDirectory: waylandDir);
   } on ProcessException {
     throw ToolError('zig is not on PATH');
   }
   if (result.exitCode != 0) {
     final output = '${result.stdout}${result.stderr}'.trim();
     if (output.isNotEmpty) stderr.writeln(output);
-    throw ToolError(
-      'zig build --help failed with exit code ${result.exitCode}',
-    );
+    throw ToolError('zig build --help failed with exit code ${result.exitCode}');
   }
 }
 
@@ -193,9 +178,7 @@ _Identity _ensureIdentity(File manifest, String appName) {
     );
     final replaced = text.replaceFirst(placeholder, '.dependencies = .{},');
     if (replaced == text) {
-      throw ToolError(
-        'could not clear the placeholder filo dependency from build.zig.zon',
-      );
+      throw ToolError('could not clear the placeholder filo dependency from build.zig.zon');
     }
     text = replaced;
     changed = true;
@@ -206,19 +189,12 @@ _Identity _ensureIdentity(File manifest, String appName) {
 }
 
 String _insertAfterVersion(String text, String field) {
-  final versionLine = RegExp(
-    r'^(\s*)\.version\s*=.*$',
-    multiLine: true,
-  ).firstMatch(text);
+  final versionLine = RegExp(r'^(\s*)\.version\s*=.*$', multiLine: true).firstMatch(text);
   if (versionLine == null) {
     throw ToolError('build.zig.zon has no .version field');
   }
   final indent = versionLine.group(1) ?? '    ';
-  return text.replaceRange(
-    versionLine.end,
-    versionLine.end,
-    '\n$indent$field',
-  );
+  return text.replaceRange(versionLine.end, versionLine.end, '\n$indent$field');
 }
 
 String _packageName(String appName) {
@@ -286,16 +262,12 @@ Future<void> downloadAndUntar(
     client.close();
   }
 
-  final result = Process.runSync(
-    "tar",
-    [
-      "-C",
-      file.parent.path,
-      "-xf",
-      file.path,
-    ],
-    stderrEncoding: utf8,
-  );
+  final result = Process.runSync("tar", [
+    "-C",
+    file.parent.path,
+    "-xf",
+    file.path,
+  ], stderrEncoding: utf8);
   if (result.exitCode != 0) {
     throw ToolError("Fail to untar ${file.path}\n${result.stderr}");
   }

@@ -16,7 +16,7 @@ class SetupFiloCommand extends ToolCommand {
       negatable: false,
       help: 'Run a fast build-graph check after fetching.',
     )
-    ..addFlag('with-engine', help: 'Download the engines');
+    ..addFlag('with-engine', help: 'Download the engines', defaultsTo: false);
 
   @override
   String get name => 'setup-filo';
