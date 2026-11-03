@@ -52,9 +52,11 @@ fn sendKeyEvent(eng: *engine.Engine, info: KeyInfo) void {
     if (info.pressed and info.codepoint >= 0x20) {
         var buf: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(@intCast(info.codepoint), &buf) catch 0;
-        @memcpy(char_z[0..n], buf[0..n]);
-        char_z[n] = 0;
-        event.character = @ptrCast(&char_z);
+        if (n > 0) {
+            @memcpy(char_z[0..n], buf[0..n]);
+            char_z[n] = 0;
+            event.character = @ptrCast(&char_z);
+        }
     }
 
     eng.sendKeyEvent(&event);
