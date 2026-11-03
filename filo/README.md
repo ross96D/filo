@@ -9,7 +9,7 @@ installed artifact.
 - Zig 0.17
 - Wayland (`wayland-client`, a compositor with `xdg-shell`)
 - `libxkbcommon`
-- A Vulkan 1.3 driver
+- A Vulkan 1.1 driver
 - A Flutter engine build (`libflutter_engine.so`), its ICU data and the
   application's `flutter_assets` at runtime
 
@@ -70,19 +70,19 @@ it is enough.
 
 `filo.Config` is the host-facing configuration:
 
-| Field               | Meaning                                                                  |
-| ------------------- | ------------------------------------------------------------------------ |
-| `engine_lib`        | Path to `libflutter_engine.so`                                           |
-| `icu_data`          | Path to `icudtl.dat`                                                     |
-| `assets`            | Path to the application's `flutter_assets` directory                     |
-| `aot_lib`           | Optional path to the AOT `libapp.so`; JIT when null                      |
-| `force_impeller`    | Use Impeller instead of Skia (expected to fail with the compositor path) |
-| `vulkan_validation` | Enable the Vulkan validation layer when installed                        |
-| `trace`             | Print per-frame synchronization timings                                  |
-| `bootstrap_layer`   | Bootstrap implicit view 0 as a layer instead of an xdg_toplevel          |
-| `bootstrap_layer_surface` | Layer/anchors/margins/size/namespace for that surface (see below) |
-| `engine_args`       | Extra engine switches supplied by the host                               |
-| `dart_entrypoint_args` | Arguments for Dart's `main(List<String> args)`                       |
+| Field                     | Meaning                                                                  |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `engine_lib`              | Path to `libflutter_engine.so`                                           |
+| `icu_data`                | Path to `icudtl.dat`                                                     |
+| `assets`                  | Path to the application's `flutter_assets` directory                     |
+| `aot_lib`                 | Optional path to the AOT `libapp.so`; JIT when null                      |
+| `force_impeller`          | Use Impeller instead of Skia (expected to fail with the compositor path) |
+| `vulkan_validation`       | Enable the Vulkan validation layer when installed                        |
+| `trace`                   | Print per-frame synchronization timings                                  |
+| `bootstrap_layer`         | Bootstrap implicit view 0 as a layer instead of an xdg_toplevel          |
+| `bootstrap_layer_surface` | Layer/anchors/margins/size/namespace for that surface (see below)        |
+| `engine_args`             | Extra engine switches supplied by the host                               |
+| `dart_entrypoint_args`    | Arguments for Dart's `main(List<String> args)`                           |
 
 `Config.fromEnv` reads the development environment variables
 `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`, `FILO_AOT_LIB`,
@@ -108,24 +108,12 @@ forward `--dart-entrypoint-args`:
 FILO_DART_ENTRYPOINT_ARGS=$'--dart-flag1\npositional' flutter run -d filo_wayland
 ```
 
-`bootstrap_layer` chooses the role of the implicit view (id 0) before the engine
-starts: a layer surface instead of an xdg_toplevel. It is not a restriction on
-the windows the app may create. Choose it to match the app's first window; the
-current engine integration reliably presents that bootstrap view. The setting
-exists because the engine needs view 0's native surface before its first frame.
-
-The defaults in `LayerBootstrap` match the `windowing_demo` panel: top layer,
-anchored top-right, 8px top/right margin, 300×300, on-demand keyboard. The first
-`FiloLayerWindowController` should use the same properties; it then adopts that
-surface without reconfiguring it. A controller with different properties updates
-the surface, which can race its first frame, so hosts with a different panel
-should set `Config.bootstrap_layer_surface` accordingly. `FILO_LAYER_ONLY=1` is
-the development-runner switch that sets `bootstrap_layer`.
+`bootstrap_layer` it appears that the engine needs view 0's native surface before
+its first frame. This settings makes the app create the first view as a wlr-layer-shell
+instead of a xdg-toplevel.
 
 The runtime copies the config strings, so the caller's buffers only need to
-live until `Runtime.init` returns. `engine_args` and `dart_entrypoint_args` are
-the exception: the runtime only reads them during `Runtime.init`, so the backing
-strings need to live until then, not for the runtime's lifetime.
+live until `Runtime.init` returns.
 
 ## Lifecycle
 
@@ -143,8 +131,6 @@ try runtime.run(); // blocks
   engine's eventfd, so the loop wakes up and stops on its own thread.
 - `deinit` frees the runtime; it is one-shot. Call it after `run` returns (or
   after a failed `init`).
-- One process has one embedder. `Runtime.init` returns
-  `error.AlreadyInitialized` while another runtime is alive.
 
 ## Dart windowing package
 
@@ -186,59 +172,10 @@ copied there. Landing in the engine's `$ORIGIN` directory is what makes
 with real copies so the bundle stays relocatable.
 
 The engine is expected to have `$ORIGIN` in its `RUNPATH`; the runner does not
-patch it. Build the engine with `-Wl,-rpath,'$ORIGIN'`, or add it to a prebuilt
-engine with:
+patch it. Add it to a prebuilt engine with:
 
 ```sh
 patchelf --add-rpath '$ORIGIN' /path/to/libflutter_engine.so
 ```
 
 `demos/native_assets/` is a minimal end-to-end example.
-
-## Flutter custom devices
-
-For `flutter run -d <device>`, use the per-app runner template in
-[`templates/wayland/`](templates/wayland/README.md). The template contains:
-
-- a Zig host that imports `filo` and calls `filo.run`,
-- a Dart tool entrypoint, `tool/wayland.dart`, with one file per command under
-  `tool/src/commands/`, implementing the `postBuild`/`ping` hooks plus setup,
-  release builds and device registration,
-- a `custom-device.json` whose `runDebug` starts the native host directly,
-- a fixed bundle layout that the host reads relative to its own executable.
-
-Copy it into an app as `wayland/`, run
-`dart wayland/tool/wayland.dart setup-filo <url>` to assign the Zig package
-identity and fetch filo with a pinned hash, place the engines under
-`wayland/engine/{debug,release}/` and ICU data at
-`wayland/engine/common/icudtl.dat`, then register the device once with
-`dart wayland/tool/wayland.dart register-device`. Registration writes the host
-architecture into the generated custom-device entry. The same global device
-entry works for every app that has a `wayland/` folder.
-
-`FILO_ENGINE_LIB`, `FILO_ENGINE_LIB_RELEASE`, `FILO_ICU_DATA`, `FILO_ASSETS`
-and `FILO_AOT_LIB` override the default sources and paths.
-
-Flutter custom devices do not forward `--dart-entrypoint-args`; set
-`FILO_DART_ENTRYPOINT_ARGS` with one argument per line when running Flutter.
-Engine switches from `${engineOptions}` are currently ignored.
-
-Flutter custom devices only support debug builds. For release, use the
-template's `build-release` command: it runs `flutter assemble` for the AOT
-snapshot, builds the host with `-Doptimize=ReleaseFast`, and stages a
-relocatable bundle in `build/wayland/<arch>/release/bundle/`. See the template
-README for the required engine and the bundle layout.
-
-## Development
-
-```sh
-zig build          # build the development runner
-zig build run      # run it (needs the FILO_* variables)
-zig build check    # compile + formatting check
-zig build test     # unit tests
-zig build fmt      # format in place
-```
-
-The development runner reads `FILO_ENGINE_LIB`, `FILO_ICU_DATA`, `FILO_ASSETS`
-and `FILO_AOT_LIB` from the environment. For `flutter run`, use the
-custom-device template above.
