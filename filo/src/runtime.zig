@@ -26,9 +26,6 @@ const mouse_cursor = @import("flutter/mouse_cursor.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 const windowing = @import("windowing.zig");
 
-/// Whether a runtime already owns the process-wide embedder state.
-var instance_active = std.atomic.Value(bool).init(false);
-
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
 
@@ -61,9 +58,6 @@ pub const Runtime = struct {
         io: std.Io,
         config: manifest.Config,
     ) !*Runtime {
-        if (instance_active.swap(true, .acq_rel)) return error.AlreadyInitialized;
-        errdefer instance_active.store(false, .release);
-
         // Copy the config paths before callers can free their buffers. The
         // engine consumes them during init; the copies stay owned by the
         // runtime.
@@ -317,7 +311,6 @@ pub const Runtime = struct {
         allocator.free(self.icu_data);
         allocator.free(self.engine_lib);
 
-        instance_active.store(false, .release);
         allocator.destroy(self);
     }
 
