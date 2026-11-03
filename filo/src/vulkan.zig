@@ -13,7 +13,7 @@ pub const device_extensions = [_][*:0]const u8{
     vk.device_extensions.khr_swapchain.name.ptr,
 };
 
-const api_version = vk.API_VERSION_1_3;
+const api_version = vk.API_VERSION_1_1;
 
 /// The one layer worth having: it turns the renderer's Vulkan misuse into
 /// output instead of silence.

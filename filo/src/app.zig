@@ -1600,7 +1600,7 @@ pub fn rendererConfig(vk_ctx: *vulkan.Context) c.FlutterRendererConfig {
     config.type = c.kVulkan;
     config.unnamed_0.vulkan = .{
         .struct_size = @sizeOf(c.FlutterVulkanRendererConfig),
-        .version = vk.API_VERSION_1_3.toU32(),
+        .version = vk.API_VERSION_1_1.toU32(),
         .instance = @ptrCast(vk_ctx.instance),
         .physical_device = @ptrCast(vk_ctx.pdev),
         .device = @ptrCast(vk_ctx.device),
