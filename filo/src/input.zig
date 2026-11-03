@@ -24,7 +24,7 @@ fn modifierMask(state: *xkb.xkb_state) u32 {
     if (xkb.xkb_state_mod_name_is_active(state, "Control", effective) != 0) mask |= 1 << 2;
     if (xkb.xkb_state_mod_name_is_active(state, "Mod1", effective) != 0) mask |= 1 << 3;
     if (xkb.xkb_state_mod_name_is_active(state, "Mod2", effective) != 0) mask |= 1 << 4;
-    if (xkb.xkb_state_mod_name_is_active(state, "Mod4", effective) != 0) mask |= 1 << 28;
+    if (xkb.xkb_state_mod_name_is_active(state, "Mod4", effective) != 0) mask |= 1 << 26;
     return mask;
 }
 
