@@ -67,5 +67,3 @@ Native asset libraries loaded by Dart build hooks need `$ORIGIN` in the engine's
 ```sh
 patchelf --add-rpath '$ORIGIN' /path/to/libflutter_engine.so
 ```
-
-See [`filo/README.md`](filo/README.md) for the Zig API, configuration, and bundle layout.
