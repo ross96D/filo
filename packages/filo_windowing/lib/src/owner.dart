@@ -36,6 +36,9 @@ class FiloWindowingOwner implements WindowingOwner {
   /// The native bridge.
   final FiloWindowingBackend backend;
 
+  /// Whether the compositor currently advertises the blur background effect.
+  bool get isBackgroundEffectAvailable => backend.isBackgroundEffectAvailable;
+
   /// Resolves a view id to a Flutter view.
   ///
   /// Defaults to searching `PlatformDispatcher.views`. Tests can inject a

@@ -918,6 +918,7 @@ pub const App = struct {
             .update_layer_surface = bridgeUpdateLayerSurface,
             .set_background_effect = bridgeSetBackgroundEffect,
             .remove_background_effect = bridgeRemoveBackgroundEffect,
+            .background_effect_available = bridgeBackgroundEffectAvailable,
             .get_size = bridgeGetSize,
             .get_state = bridgeGetState,
             .get_capabilities = bridgeGetCapabilities,
@@ -1255,6 +1256,12 @@ pub const App = struct {
         app.ctx.conn.removeWindowBackgroundEffect(view.win);
         view.win.commit();
         return .ok;
+    }
+
+    fn bridgeBackgroundEffectAvailable(ctx: ?*anyopaque) bool {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        if (!app.ctx_ready) return false;
+        return app.ctx.conn.backgroundEffectAvailable();
     }
 
     fn bridgeGetSize(

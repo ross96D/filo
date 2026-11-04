@@ -251,6 +251,9 @@ external int _setBackgroundEffect(
 @Native<Int32 Function(Int64)>(symbol: 'filo_window_remove_background_effect')
 external int _removeBackgroundEffect(int viewId);
 
+@Native<Uint8 Function()>(symbol: 'filo_background_effect_available')
+external int _backgroundEffectAvailable();
+
 //------------------------------------------------------------------------------
 // Native backend
 //------------------------------------------------------------------------------
@@ -513,6 +516,9 @@ class FiloNativeBackend implements FiloWindowingBackend {
   void removeBackgroundEffect(int viewId) {
     _check(_removeBackgroundEffect(viewId), 'removeBackgroundEffect');
   }
+
+  @override
+  bool get isBackgroundEffectAvailable => _backgroundEffectAvailable() != 0;
 
   void _forget(int viewId) {
     final record = _windows.remove(viewId);

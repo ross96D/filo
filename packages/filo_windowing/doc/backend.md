@@ -145,6 +145,7 @@ The remaining methods are also synchronous:
 - `updateLayerSurface`
 - `setBackgroundEffect`
 - `removeBackgroundEffect`
+- `isBackgroundEffectAvailable`
 - `setParent`
 
 They may enqueue native work, but they must not return a controller or a view id
@@ -211,6 +212,11 @@ These map to the Wayland `ext-background-effect-v1` protocol. `region` is in
 surface-local logical pixels and is clipped by the compositor to the surface;
 `null`/removal is expressed by calling `removeBackgroundEffect`. The currently
 defined effect is `FiloBackgroundEffect.blur`.
+
+`isBackgroundEffectAvailable` reports whether the compositor advertised the
+manager and the blur capability in its latest capabilities event. It is a
+snapshot: it can be false before the first event arrives or after the capability
+is withdrawn.
 
 The request is double-buffered on the `wl_surface` and takes effect on the next
 commit. A compositor without `ext_background_effect_manager_v1` (or without the

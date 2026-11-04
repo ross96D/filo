@@ -296,6 +296,20 @@ void main() {
     expect(backend.calls, contains('removeBackgroundEffect:$id'));
   });
 
+  test('background effect availability reflects the backend', () {
+    expect(owner.isBackgroundEffectAvailable, isTrue);
+
+    backend.backgroundEffectAvailable = false;
+    expect(owner.isBackgroundEffectAvailable, isFalse);
+
+    final controller = owner.createRegularWindowController(
+      delegate: _RegularDelegate(),
+      size: const Size(100, 100),
+      resizable: true,
+    );
+    expect(controller.isBackgroundEffectAvailable, isFalse);
+  });
+
   test(
     'a layer window adopts the implicit view and carries its layer surface',
     () {

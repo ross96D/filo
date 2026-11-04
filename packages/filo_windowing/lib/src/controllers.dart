@@ -129,6 +129,9 @@ mixin FiloWindowControllerMixin on ChangeNotifier {
     _backend.removeBackgroundEffect(_viewId);
   }
 
+  /// Whether the compositor currently advertises the blur background effect.
+  bool get isBackgroundEffectAvailable => _backend.isBackgroundEffectAvailable;
+
   /// Update the cached title after a local [setTitle] call.
   void updateTitle(String title) {
     _title = title;
@@ -640,5 +643,18 @@ extension FiloWindowBackgroundEffect on BaseWindowController {
       );
     }
     (controller as FiloWindowControllerMixin).removeBackgroundEffect();
+  }
+
+  /// Whether the compositor currently advertises the blur background effect.
+  bool get isBackgroundEffectAvailable {
+    final controller = this;
+    if (controller is! FiloWindowControllerMixin) {
+      throw UnsupportedError(
+        'isBackgroundEffectAvailable needs a controller backed by '
+        'filo_windowing',
+      );
+    }
+    return (controller as FiloWindowControllerMixin)
+        .isBackgroundEffectAvailable;
   }
 }

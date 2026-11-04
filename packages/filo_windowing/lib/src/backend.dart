@@ -101,6 +101,13 @@ abstract interface class FiloWindowingBackend {
   /// Remove any background effect from [viewId]'s surface.
   void removeBackgroundEffect(int viewId);
 
+  /// Whether the compositor currently advertises the blur background effect.
+  ///
+  /// This is a snapshot of the latest compositor capability event. It may be
+  /// false before that event arrives, or after the compositor withdraws the
+  /// capability.
+  bool get isBackgroundEffectAvailable;
+
   /// Set the native parent, or detach it when [parentViewId] is -1.
   void setParent(int viewId, int parentViewId);
 }

@@ -245,6 +245,7 @@ pub const Host = struct {
         update_layer_surface: *const fn (ctx: ?*anyopaque, view_id: i64, layer: *const LayerSurface) Status,
         set_background_effect: *const fn (ctx: ?*anyopaque, view_id: i64, effect: BackgroundEffect, region: *const Rect) Status,
         remove_background_effect: *const fn (ctx: ?*anyopaque, view_id: i64) Status,
+        background_effect_available: *const fn (ctx: ?*anyopaque) bool,
 
         get_size: *const fn (ctx: ?*anyopaque, view_id: i64, out: *Size) Status,
         get_state: *const fn (ctx: ?*anyopaque, view_id: i64, out: *u32) Status,
@@ -325,6 +326,10 @@ pub const Host = struct {
 
     pub fn removeBackgroundEffect(self: Host, view_id: i64) Status {
         return self.vtable.remove_background_effect(self.ctx, view_id);
+    }
+
+    pub fn backgroundEffectAvailable(self: Host) bool {
+        return self.vtable.background_effect_available(self.ctx);
     }
 
     pub fn getSize(self: Host, view_id: i64, out: *Size) Status {
@@ -476,6 +481,10 @@ pub export fn filo_window_remove_background_effect(view_id: i64) i32 {
     return @backingInt(host.removeBackgroundEffect(view_id));
 }
 
+pub export fn filo_background_effect_available() u8 {
+    return if (host.backgroundEffectAvailable()) 1 else 0;
+}
+
 pub export fn filo_window_get_size(view_id: i64, out: ?*Size) i32 {
     const size = out orelse return @backingInt(Status.invalid_argument);
     return @backingInt(host.getSize(view_id, size));
@@ -575,6 +584,10 @@ fn testRemoveBackgroundEffect(_: ?*anyopaque, _: i64) Status {
     return .ok;
 }
 
+fn testBackgroundEffectAvailable(_: ?*anyopaque) bool {
+    return true;
+}
+
 fn testStatusTitle(_: ?*anyopaque, _: i64, _: ?[*:0]const u8) Status {
     return .unsupported;
 }
@@ -614,6 +627,7 @@ test "the exported entry points forward to the host" {
             .update_layer_surface = testUpdateLayerSurface,
             .set_background_effect = testSetBackgroundEffect,
             .remove_background_effect = testRemoveBackgroundEffect,
+            .background_effect_available = testBackgroundEffectAvailable,
             .get_size = testGetSize,
             .get_state = testGetU32,
             .get_capabilities = testGetU32,
@@ -639,6 +653,7 @@ test "the exported entry points forward to the host" {
         filo_window_set_background_effect(7, @backingInt(BackgroundEffect.blur), &region),
     );
     try std.testing.expectEqual(@as(i32, 0), filo_window_remove_background_effect(7));
+    try std.testing.expectEqual(@as(u8, 1), filo_background_effect_available());
 
     // A null or empty region and an unknown effect are rejected before the
     // host is consulted.

@@ -334,6 +334,12 @@ pub const Connection = struct {
         surface.setInputRegion(region);
     }
 
+    /// Whether the compositor advertises ext-background-effect and the blur
+    /// capability. This is a snapshot of the latest capabilities event.
+    pub fn backgroundEffectAvailable(self: *const Connection) bool {
+        return self.background_effect_manager != null and self.blur_supported;
+    }
+
     /// Apply a background effect behind `win`'s surface. The region is in
     /// surface-local coordinates and is clipped by the compositor to the
     /// surface size. The request is double-buffered on the surface, so the
@@ -351,8 +357,8 @@ pub const Connection = struct {
             .blur => {},
         }
 
-        const manager = self.background_effect_manager orelse return error.BackgroundEffectUnavailable;
-        if (!self.blur_supported) return error.BackgroundEffectUnavailable;
+        if (!self.backgroundEffectAvailable()) return error.BackgroundEffectUnavailable;
+        const manager = self.background_effect_manager.?;
 
         const effect_surface = win.background_effect orelse blk: {
             const created = try manager.getBackgroundEffect(win.surface);

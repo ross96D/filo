@@ -177,16 +177,23 @@ regular window adopts it. This is the engine's startup frame path.
 Every controller exposes the background-effect API:
 
 ```dart
-// Blur the whole window background. Coordinates are surface-local logical
-// pixels; the compositor clips the region to the surface.
-controller.setBackgroundEffect(
-  Offset.zero & controller.contentSize,
-  FiloBackgroundEffect.blur,
-);
+// Check support first; this is a snapshot of the compositor capability.
+if (controller.isBackgroundEffectAvailable) {
+  // Blur the whole window background. Coordinates are surface-local logical
+  // pixels; the compositor clips the region to the surface.
+  controller.setBackgroundEffect(
+    Offset.zero & controller.contentSize,
+    FiloBackgroundEffect.blur,
+  );
+}
 
 // Remove it again.
 controller.removeBackgroundEffect();
 ```
+
+The check is also available on the owner and the backend:
+`owner.isBackgroundEffectAvailable` and
+`backend.isBackgroundEffectAvailable`.
 
 This uses the Wayland `ext-background-effect-v1` protocol. The effect is
 double-buffered and applies on the next frame. Only `FiloBackgroundEffect.blur`

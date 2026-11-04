@@ -14,6 +14,9 @@ class FakeBackend implements FiloWindowingBackend {
   final List<String> calls = <String>[];
   final Map<int, FiloWindowObserver> observers = <int, FiloWindowObserver>{};
 
+  /// Whether [isBackgroundEffectAvailable] reports support.
+  bool backgroundEffectAvailable = true;
+
   /// The view id of the most recently created window.
   int? lastViewId;
 
@@ -113,6 +116,9 @@ class FakeBackend implements FiloWindowingBackend {
   @override
   void removeBackgroundEffect(int viewId) =>
       calls.add('removeBackgroundEffect:$viewId');
+
+  @override
+  bool get isBackgroundEffectAvailable => backgroundEffectAvailable;
 
   @override
   void setParent(int viewId, int parentViewId) =>
