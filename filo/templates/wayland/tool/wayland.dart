@@ -23,6 +23,7 @@ import 'src/commands/ping.dart';
 import 'src/commands/post_build.dart';
 import 'src/commands/register_device.dart';
 import 'src/commands/run.dart';
+import 'src/commands/screenshot.dart';
 import 'src/commands/setup_filo.dart';
 import 'src/tool.dart';
 
@@ -36,7 +37,8 @@ Future<void> main(List<String> args) async {
     ..addCommand(RunCommand())
     ..addCommand(BuildReleaseCommand())
     ..addCommand(SetupFiloCommand())
-    ..addCommand(RegisterDeviceCommand());
+    ..addCommand(RegisterDeviceCommand())
+    ..addCommand(ScreenshotCommand());
 
   try {
     await runner.run(args);

@@ -9,6 +9,11 @@
         "wayland/tool/wayland.dart",
         "ping"
     ],
+    "screenshot": [
+        "dart",
+        "wayland/tool/wayland.dart",
+        "screenshot"
+    ],
     "postBuild": [
         "dart",
         "wayland/tool/wayland.dart",

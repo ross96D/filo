@@ -28,12 +28,17 @@ const windowing = @import("windowing.zig");
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
 
     /// The caller's config strings, copied into storage owned here.
     engine_lib: [:0]u8 = undefined,
     icu_data: [:0]u8 = undefined,
     assets: [:0]u8 = undefined,
     aot_lib: ?[:0]u8 = null,
+
+    /// Where the embedder publishes the debug VM service URI, if it has one.
+    /// The screenshot tool reads this file to ask the engine for a PNG.
+    vm_service_info: ?[]u8 = null,
 
     loop: ev.Loop = undefined,
     vk: vulkan.Context = undefined,
@@ -73,15 +78,58 @@ pub const Runtime = struct {
             null;
         errdefer if (aot_lib) |aot| allocator.free(aot);
 
+        // The screenshot tool talks to the debug VM service over loopback. Pick
+        // the port ourselves so the embedder can publish a URI immediately; the
+        // engine only writes `--write-service-info` when the VM starts its own
+        // service, which is not how the embedder starts it. Release (AOT)
+        // builds have no VM service and publish nothing.
+        var vm_service_port: ?u16 = null;
+        var vm_service_info: ?[]u8 = null;
+        if (aot_lib == null and !hasEngineFlag(config.engine_args, "--disable-vm-service")) {
+            vm_service_port = allocateLoopbackPort(io) catch |err| blk: {
+                std.debug.print("filo: cannot reserve a VM service port: {}\n", .{err});
+                break :blk null;
+            };
+            if (vm_service_port) |port| {
+                vm_service_info = try publishVmServiceInfo(allocator, io, port);
+                // Without the file the tool cannot find the app; leave the
+                // engine with its normal port selection instead.
+                if (vm_service_info == null) vm_service_port = null;
+            }
+        }
+        errdefer if (vm_service_info) |path| {
+            std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+            allocator.free(path);
+        };
+
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
+            .io = io,
             .engine_lib = engine_lib,
             .icu_data = icu_data,
             .assets = assets,
             .aot_lib = aot_lib,
+            .vm_service_info = vm_service_info,
         };
+
+        // The VM service switches are appended after the host's engine args,
+        // so they win if the host also set a port or host. They are only for
+        // this init call; Engine.init copies what it needs.
+        var args_arena = std.heap.ArenaAllocator.init(allocator);
+        defer args_arena.deinit();
+        const args_alloc = args_arena.allocator();
+        var engine_args: std.ArrayListUnmanaged([]const u8) = .empty;
+        try engine_args.appendSlice(args_alloc, config.engine_args);
+        if (vm_service_port) |port| {
+            try engine_args.append(
+                args_alloc,
+                try std.fmt.allocPrint(args_alloc, "--vm-service-port={d}", .{port}),
+            );
+            try engine_args.append(args_alloc, "--vm-service-host=127.0.0.1");
+            try engine_args.append(args_alloc, "--disable-service-auth-codes");
+        }
 
         const engine_config = manifest.Config{
             .engine_lib = engine_lib,
@@ -92,7 +140,7 @@ pub const Runtime = struct {
             .vulkan_validation = config.vulkan_validation,
             .trace = config.trace,
             .bootstrap_layer = config.bootstrap_layer,
-            .engine_args = config.engine_args,
+            .engine_args = engine_args.items,
             .dart_entrypoint_args = config.dart_entrypoint_args,
         };
 
@@ -299,6 +347,14 @@ pub const Runtime = struct {
         eng.deinit(self.allocator);
         windowing.uninstall();
 
+        // The embedder published this while the engine was alive; it is stale
+        // once the engine is gone, and a reader must not mistake it for a
+        // running app.
+        if (self.vm_service_info) |path| {
+            std.Io.Dir.deleteFileAbsolute(self.io, path) catch {};
+            self.allocator.free(path);
+        }
+
         self.app.deinitViews();
         self.app.channels.deinit();
         self.vk.deinit();
@@ -318,3 +374,79 @@ pub const Runtime = struct {
         return self.app.views_by_id.get(id);
     }
 };
+
+/// Pick the file the embedder publishes its VM service URI in.
+///
+/// The file lives under `$XDG_RUNTIME_DIR/filo` and is named after the
+/// executable and process, so several running apps (and several instances of
+/// one app) do not collide. Returning null simply disables the screenshot tool;
+/// it never prevents the app from starting.
+fn resolveVmServiceInfo(allocator: std.mem.Allocator, io: std.Io) !?[]u8 {
+    const runtime_dir_ptr = std.c.getenv("XDG_RUNTIME_DIR") orelse return null;
+    const runtime_dir = std.mem.span(runtime_dir_ptr);
+    if (runtime_dir.len == 0) return null;
+
+    const exe = std.process.executablePathAlloc(io, allocator) catch |err| {
+        std.debug.print(
+            "filo: cannot resolve the executable path for VM service info: {}\n",
+            .{err},
+        );
+        return null;
+    };
+    defer allocator.free(exe);
+
+    const dir = try std.fs.path.join(allocator, &.{ runtime_dir, "filo" });
+    defer allocator.free(dir);
+    std.Io.Dir.createDirPath(.cwd(), io, dir) catch |err| {
+        std.debug.print(
+            "filo: cannot create VM service info directory {s}: {}\n",
+            .{ dir, err },
+        );
+        return null;
+    };
+
+    return try std.fmt.allocPrint(allocator, "{s}/{s}-{d}.json", .{
+        dir,
+        std.fs.path.basename(exe),
+        std.os.linux.getpid(),
+    });
+}
+
+/// Reserve a loopback port for the debug VM service. The engine binds the same
+/// port after this listener closes; the short race is preferable to not knowing
+/// which port the engine picked.
+fn allocateLoopbackPort(io: std.Io) !u16 {
+    var address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    return server.socket.address.getPort();
+}
+
+/// Write the service URI the screenshot tool connects to. The engine's service
+/// is started with `--disable-service-auth-codes`, so the URI has no token.
+fn publishVmServiceInfo(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+) !?[]u8 {
+    const path = try resolveVmServiceInfo(allocator, io) orelse return null;
+
+    var buf: [128]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf, "{{\"uri\":\"http://127.0.0.1:{d}/\"}}", .{port}) catch unreachable;
+    std.Io.Dir.writeFile(.cwd(), io, .{ .sub_path = path, .data = json }) catch |err| {
+        std.debug.print("filo: cannot write VM service info {s}: {}\n", .{ path, err });
+        allocator.free(path);
+        return null;
+    };
+    return path;
+}
+
+fn hasEngineFlag(args: []const []const u8, flag: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, flag)) return true;
+        if (arg.len > flag.len and
+            std.mem.startsWith(u8, arg, flag) and
+            arg[flag.len] == '=') return true;
+    }
+    return false;
+}

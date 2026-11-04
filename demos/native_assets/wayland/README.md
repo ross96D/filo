@@ -155,6 +155,18 @@ the engine link. Because the engine has `$ORIGIN` in its RUNPATH, its
 For a manual run, `dart wayland/tool/wayland.dart run` stages the debug bundle
 and starts the host with the app root as the working directory.
 
+## Screenshots
+
+`flutter screenshot -d filo_wayland` and the `s` key in `flutter run` work
+without `grim`, a portal, or any other external tool. In debug builds the host
+publishes its VM service URI under `$XDG_RUNTIME_DIR/filo/`; the `screenshot`
+command connects to that service and asks the engine to render the last layer
+tree into an offscreen surface. Flutter's custom-device hook receives the PNG
+as base64 on stdout.
+
+The engine captures the implicit view (view 0), so multi-window apps only get
+the first window. Release builds have no VM service and do not publish a URI.
+
 ## Release builds
 
 Custom devices only support debug builds, so `flutter run` cannot produce a
