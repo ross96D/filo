@@ -109,6 +109,26 @@ mixin FiloWindowControllerMixin on ChangeNotifier {
     _backend.setConstraints(_viewId, constraints);
   }
 
+  /// Apply a background effect behind this window's surface.
+  ///
+  /// [region] is in surface-local logical pixels and is clipped by the
+  /// compositor to the surface. [effect] defaults to [FiloBackgroundEffect.blur].
+  /// The effect is applied on the next frame; a compositor without
+  /// `ext-background-effect-v1` throws a [FiloWindowingException].
+  void setBackgroundEffect(
+    FiloRect region, [
+    FiloBackgroundEffect effect = FiloBackgroundEffect.blur,
+  ]) {
+    if (_destroyed) return;
+    _backend.setBackgroundEffect(_viewId, region, effect);
+  }
+
+  /// Remove any background effect from this window's surface.
+  void removeBackgroundEffect() {
+    if (_destroyed) return;
+    _backend.removeBackgroundEffect(_viewId);
+  }
+
   /// Update the cached title after a local [setTitle] call.
   void updateTitle(String title) {
     _title = title;
@@ -575,4 +595,44 @@ FiloPositioner _toFiloPositioner(
       positioner.offset.dy.round(),
     ),
   );
+}
+
+/// Background effects for controllers obtained through Flutter's factory
+/// constructors.
+///
+/// `RegularWindowController(...)`, `DialogWindowController(...)` and the popup
+/// helpers return Flutter's base controller types, which do not declare the
+/// Filo-specific background-effect API. This extension forwards to the
+/// concrete controller when it is backed by a [FiloWindowingBackend].
+extension FiloWindowBackgroundEffect on BaseWindowController {
+  /// Apply a background effect behind this window's surface.
+  ///
+  /// [region] is in surface-local logical pixels and is clipped by the
+  /// compositor to the surface. [effect] defaults to [FiloBackgroundEffect.blur].
+  void setBackgroundEffect(
+    FiloRect region, [
+    FiloBackgroundEffect effect = FiloBackgroundEffect.blur,
+  ]) {
+    final controller = this;
+    if (controller is! FiloWindowControllerMixin) {
+      throw UnsupportedError(
+        'setBackgroundEffect needs a controller backed by filo_windowing',
+      );
+    }
+    (controller as FiloWindowControllerMixin).setBackgroundEffect(
+      region,
+      effect,
+    );
+  }
+
+  /// Remove any background effect from this window's surface.
+  void removeBackgroundEffect() {
+    final controller = this;
+    if (controller is! FiloWindowControllerMixin) {
+      throw UnsupportedError(
+        'removeBackgroundEffect needs a controller backed by filo_windowing',
+      );
+    }
+    (controller as FiloWindowControllerMixin).removeBackgroundEffect();
+  }
 }

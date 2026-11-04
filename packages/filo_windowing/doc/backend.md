@@ -142,6 +142,8 @@ The remaining methods are also synchronous:
 - `setFullscreen`
 - `updatePosition`
 - `updateLayerSurface`
+- `setBackgroundEffect`
+- `removeBackgroundEffect`
 - `setParent`
 
 They may enqueue native work, but they must not return a controller or a view id
@@ -196,6 +198,26 @@ compositor without wlr-layer-shell reports the create as unsupported (status 3).
 
 Layer surfaces may be transparent; the Filo embedder presents them with
 premultiplied alpha when the compositor supports it.
+
+## Background effects
+
+```dart
+void setBackgroundEffect(int viewId, Rect region, FiloBackgroundEffect effect);
+void removeBackgroundEffect(int viewId);
+```
+
+These map to the Wayland `ext-background-effect-v1` protocol. `region` is in
+surface-local logical pixels and is clipped by the compositor to the surface;
+`null`/removal is expressed by calling `removeBackgroundEffect`. The currently
+defined effect is `FiloBackgroundEffect.blur`.
+
+The request is double-buffered on the `wl_surface` and takes effect on the next
+commit. A compositor without `ext_background_effect_manager_v1` (or without the
+blur capability) reports the operation as unsupported (status 3). Removing an
+effect on a surface that never had one succeeds.
+
+All Filo surfaces are presented with premultiplied alpha when the compositor
+supports it, so the blur is visible through translucent Flutter content.
 
 ## Parent and child windows
 

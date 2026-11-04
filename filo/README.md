@@ -18,6 +18,10 @@ Layer windows additionally need a compositor that implements
 protocol is optional: without it, the regular, dialog, popup, and tooltip
 windows still work and creating a layer window reports `unsupported`.
 
+Background blur uses `ext_background_effect_v1`. It is optional too: compositors
+that do not advertise it (or do not advertise the blur capability) reject blur
+requests with `unsupported`, and the rest of the windowing API keeps working.
+
 ## Consuming
 
 Add the package to the host's `build.zig.zon`:

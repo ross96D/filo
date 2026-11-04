@@ -146,7 +146,7 @@ class Tool {
   String? pathEnv(String key) {
     final value = env(key);
     if (value == null) return null;
-    return p.isAbsolute(value) ? p.normalize(value) : p.join(paths.waylandDir, value);
+    return p.isAbsolute(value) ? p.normalize(value) : p.join(paths.appRoot, value);
   }
 
   String _resolveAppPath(String value) {

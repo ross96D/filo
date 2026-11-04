@@ -42,6 +42,12 @@ pub const LayerKeyboardInteractivity = enum(i32) {
     on_demand = 2,
 };
 
+/// A background effect the compositor can apply behind a translucent surface.
+/// Mirrors `FiloBackgroundEffect` in the Dart package.
+pub const BackgroundEffect = enum(i32) {
+    blur = 0,
+};
+
 /// The wlr-layer-shell properties of a layer window. Everything but the
 /// namespace and output can be changed after creation through
 /// `filo_window_update_layer_surface`.
@@ -234,6 +240,8 @@ pub const Host = struct {
         set_parent: *const fn (ctx: ?*anyopaque, view_id: i64, parent_view_id: i64) Status,
         update_position: *const fn (ctx: ?*anyopaque, view_id: i64, anchor: ?*const Rect, positioner: ?*const Positioner) Status,
         update_layer_surface: *const fn (ctx: ?*anyopaque, view_id: i64, layer: *const LayerSurface) Status,
+        set_background_effect: *const fn (ctx: ?*anyopaque, view_id: i64, effect: BackgroundEffect, region: *const Rect) Status,
+        remove_background_effect: *const fn (ctx: ?*anyopaque, view_id: i64) Status,
 
         get_size: *const fn (ctx: ?*anyopaque, view_id: i64, out: *Size) Status,
         get_state: *const fn (ctx: ?*anyopaque, view_id: i64, out: *u32) Status,
@@ -301,6 +309,19 @@ pub const Host = struct {
         layer: *const LayerSurface,
     ) Status {
         return self.vtable.update_layer_surface(self.ctx, view_id, layer);
+    }
+
+    pub fn setBackgroundEffect(
+        self: Host,
+        view_id: i64,
+        effect: BackgroundEffect,
+        region: *const Rect,
+    ) Status {
+        return self.vtable.set_background_effect(self.ctx, view_id, effect, region);
+    }
+
+    pub fn removeBackgroundEffect(self: Host, view_id: i64) Status {
+        return self.vtable.remove_background_effect(self.ctx, view_id);
     }
 
     pub fn getSize(self: Host, view_id: i64, out: *Size) Status {
@@ -436,6 +457,22 @@ pub export fn filo_window_update_layer_surface(
     return @backingInt(host.updateLayerSurface(view_id, value));
 }
 
+pub export fn filo_window_set_background_effect(
+    view_id: i64,
+    effect: i32,
+    region: ?*const Rect,
+) i32 {
+    const value = region orelse return @backingInt(Status.invalid_argument);
+    if (value.width <= 0 or value.height <= 0) return @backingInt(Status.invalid_argument);
+    const parsed = std.enums.fromInt(BackgroundEffect, effect) orelse
+        return @backingInt(Status.invalid_argument);
+    return @backingInt(host.setBackgroundEffect(view_id, parsed, value));
+}
+
+pub export fn filo_window_remove_background_effect(view_id: i64) i32 {
+    return @backingInt(host.removeBackgroundEffect(view_id));
+}
+
 pub export fn filo_window_get_size(view_id: i64, out: ?*Size) i32 {
     const size = out orelse return @backingInt(Status.invalid_argument);
     return @backingInt(host.getSize(view_id, size));
@@ -527,6 +564,14 @@ fn testUpdateLayerSurface(_: ?*anyopaque, _: i64, _: *const LayerSurface) Status
     return .unsupported;
 }
 
+fn testSetBackgroundEffect(_: ?*anyopaque, _: i64, _: BackgroundEffect, _: *const Rect) Status {
+    return .ok;
+}
+
+fn testRemoveBackgroundEffect(_: ?*anyopaque, _: i64) Status {
+    return .ok;
+}
+
 fn testStatusTitle(_: ?*anyopaque, _: i64, _: ?[*:0]const u8) Status {
     return .unsupported;
 }
@@ -564,6 +609,8 @@ test "the exported entry points forward to the host" {
             .set_parent = testStatusParent,
             .update_position = testUpdatePosition,
             .update_layer_surface = testUpdateLayerSurface,
+            .set_background_effect = testSetBackgroundEffect,
+            .remove_background_effect = testRemoveBackgroundEffect,
             .get_size = testGetSize,
             .get_state = testGetU32,
             .get_capabilities = testGetU32,
@@ -582,4 +629,28 @@ test "the exported entry points forward to the host" {
 
     try std.testing.expectEqual(@as(i32, 0), filo_window_destroy(7));
     try std.testing.expectEqual(@as(i64, 7), test_seen);
+
+    var region = Rect{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    try std.testing.expectEqual(
+        @as(i32, 0),
+        filo_window_set_background_effect(7, @backingInt(BackgroundEffect.blur), &region),
+    );
+    try std.testing.expectEqual(@as(i32, 0), filo_window_remove_background_effect(7));
+
+    // A null or empty region and an unknown effect are rejected before the
+    // host is consulted.
+    try std.testing.expectEqual(
+        @as(i32, @backingInt(Status.invalid_argument)),
+        filo_window_set_background_effect(7, @backingInt(BackgroundEffect.blur), null),
+    );
+    region.width = 0;
+    try std.testing.expectEqual(
+        @as(i32, @backingInt(Status.invalid_argument)),
+        filo_window_set_background_effect(7, @backingInt(BackgroundEffect.blur), &region),
+    );
+    region.width = 10;
+    try std.testing.expectEqual(
+        @as(i32, @backingInt(Status.invalid_argument)),
+        filo_window_set_background_effect(7, 99, &region),
+    );
 }

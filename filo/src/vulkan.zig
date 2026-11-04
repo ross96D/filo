@@ -402,8 +402,9 @@ pub const Surface = struct {
     /// separately from `Swapchain.extent` so that a clamped extent cannot make
     /// every frame rebuild with the same result.
     frame_size: vk.Extent2D,
-    /// Whether the swapchain is presented with premultiplied alpha. Layer
-    /// surfaces use it so panels and overlays can have transparent regions.
+    /// Whether the swapchain is presented with premultiplied alpha. All
+    /// surfaces use it so translucent content and background effects work;
+    /// compositors without premultiplied support fall back to opaque.
     transparent: bool = false,
     /// Set when the swapchain no longer matches the surface: a suboptimal
     /// present, or an out-of-date acquire. It is rebuilt on the next frame.
@@ -518,9 +519,9 @@ pub const Surface = struct {
         const extent = swapchainExtent(size, caps);
         const format = try chooseSurfaceFormat(ctx, surface);
         const present_mode = try choosePresentMode(ctx, surface);
-        // Opaque toplevels ignore their buffer's alpha. A layer surface asks
-        // for premultiplied alpha so the compositor can blend transparent
-        // regions; fall back to opaque if the compositor does not support it.
+        // Opaque surfaces ignore their buffer's alpha. Every surface asks for
+        // premultiplied alpha so translucent regions and background effects
+        // show; fall back to opaque if the compositor does not support it.
         const composite_alpha: vk.CompositeAlphaFlagsKHR = if (transparent and
             caps.supported_composite_alpha.pre_multiplied_khr)
             .{ .pre_multiplied_khr = true }

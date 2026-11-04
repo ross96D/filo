@@ -3,6 +3,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
+const ext = wayland.client.ext;
 const wp = wayland.client.wp;
 const zwlr = wayland.client.zwlr;
 
@@ -33,6 +34,8 @@ const Globals = struct {
     layer_shell_version: u32 = 0,
     activation_name: ?u32 = null,
     activation_version: u32 = 0,
+    background_effect_name: ?u32 = null,
+    background_effect_version: u32 = 0,
 };
 
 /// The Wayland connection: the display, its global objects (compositor, xdg,
@@ -56,6 +59,11 @@ pub const Connection = struct {
     /// The compositor's xdg-activation support, if it advertises the global.
     /// Without it, activation requests fall back to the compositor's policy.
     activation: ?*xdg.ActivationV1 = null,
+    /// The compositor's ext-background-effect support, if it advertises the
+    /// global. Without it, background effect requests report unsupported.
+    background_effect_manager: ?*ext.BackgroundEffectManagerV1 = null,
+    /// Whether the compositor currently advertises the blur capability.
+    blur_supported: bool = false,
     pointer: ?*wl.Pointer = null,
     keyboard: ?*wl.Keyboard = null,
     /// The compositor's cursor-shape-v1 support, if it advertises the global.
@@ -152,6 +160,17 @@ pub const Connection = struct {
             self.activation = registry.bind(name, xdg.ActivationV1, version) catch null;
         }
 
+        if (globals.background_effect_name) |name| {
+            const version = @min(
+                globals.background_effect_version,
+                ext.BackgroundEffectManagerV1.generated_version,
+            );
+            self.background_effect_manager = registry.bind(name, ext.BackgroundEffectManagerV1, version) catch null;
+            if (self.background_effect_manager) |manager| {
+                manager.setListener(*Connection, backgroundEffectListener, self);
+            }
+        }
+
         return self;
     }
 
@@ -174,6 +193,7 @@ pub const Connection = struct {
             if (ls.getVersion() >= 3) ls.destroy() else @as(*wl.Proxy, @ptrCast(ls)).destroy();
         }
         if (self.activation) |activation| activation.destroy();
+        if (self.background_effect_manager) |manager| manager.destroy();
         // `wl_data_device_manager` has no destructor below version 4, which is
         // all we bind, so drop the proxy directly.
         @as(*wl.Proxy, @ptrCast(self.data_device_manager)).destroy();
@@ -290,6 +310,46 @@ pub const Connection = struct {
         surface.setInputRegion(region);
     }
 
+    /// Apply a background effect behind `win`'s surface. The region is in
+    /// surface-local coordinates and is clipped by the compositor to the
+    /// surface size. The request is double-buffered on the surface, so the
+    /// caller commits it.
+    ///
+    /// Fails with `error.BackgroundEffectUnavailable` when the compositor does
+    /// not implement ext-background-effect or does not advertise blur.
+    pub fn setWindowBackgroundEffect(
+        self: *Connection,
+        win: *window.Window,
+        effect: windowing.BackgroundEffect,
+        region: windowing.Rect,
+    ) !void {
+        switch (effect) {
+            .blur => {},
+        }
+
+        const manager = self.background_effect_manager orelse return error.BackgroundEffectUnavailable;
+        if (!self.blur_supported) return error.BackgroundEffectUnavailable;
+
+        const effect_surface = win.background_effect orelse blk: {
+            const created = try manager.getBackgroundEffect(win.surface);
+            win.background_effect = created;
+            break :blk created;
+        };
+
+        // `wl_region` has copy semantics here: the compositor copies it into
+        // the pending surface state, so it can be destroyed immediately.
+        const wl_region = try self.compositor.createRegion();
+        defer wl_region.destroy();
+        wl_region.add(region.x, region.y, region.width, region.height);
+        effect_surface.setBlurRegion(wl_region);
+    }
+
+    /// Remove the background effect from `win`'s surface. The request is
+    /// double-buffered, so the caller commits it.
+    pub fn removeWindowBackgroundEffect(_: *Connection, win: *window.Window) void {
+        if (win.background_effect) |effect_surface| effect_surface.setBlurRegion(null);
+    }
+
     /// Create a popup attached to `parent` and positioned by `positioner`. The
     /// positioner is only needed for this call; the caller may destroy it once
     /// this returns.
@@ -394,6 +454,16 @@ pub const Connection = struct {
     }
 
     fn ignoreOutput(_: *wl.Output, _: wl.Output.Event, _: *Connection) void {}
+
+    fn backgroundEffectListener(
+        _: *ext.BackgroundEffectManagerV1,
+        event: ext.BackgroundEffectManagerV1.Event,
+        self: *Connection,
+    ) void {
+        switch (event) {
+            .capabilities => |caps| self.blur_supported = caps.flags.blur,
+        }
+    }
 
     fn outputListener(_: *wl.Output, event: wl.Output.Event, self: *Connection) void {
         switch (event) {
@@ -549,6 +619,11 @@ pub const Connection = struct {
                     if (globals.activation_name == null) {
                         globals.activation_name = global.name;
                         globals.activation_version = global.version;
+                    }
+                } else if (std.mem.orderZ(u8, global.interface, ext.BackgroundEffectManagerV1.interface.name) == .eq) {
+                    if (globals.background_effect_name == null) {
+                        globals.background_effect_name = global.name;
+                        globals.background_effect_version = global.version;
                     }
                 }
             },

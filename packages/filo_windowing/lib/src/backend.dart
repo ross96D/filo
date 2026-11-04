@@ -88,6 +88,19 @@ abstract interface class FiloWindowingBackend {
   /// namespace are fixed at creation and ignored here.
   void updateLayerSurface(int viewId, FiloLayerSurface surface);
 
+  /// Apply a background effect behind [viewId]'s surface.
+  ///
+  /// [region] is in surface-local logical pixels and is clipped by the
+  /// compositor to the surface. [effect] selects the effect to apply.
+  void setBackgroundEffect(
+    int viewId,
+    FiloRect region,
+    FiloBackgroundEffect effect,
+  );
+
+  /// Remove any background effect from [viewId]'s surface.
+  void removeBackgroundEffect(int viewId);
+
   /// Set the native parent, or detach it when [parentViewId] is -1.
   void setParent(int viewId, int parentViewId);
 }

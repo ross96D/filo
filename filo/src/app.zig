@@ -211,17 +211,16 @@ pub const App = struct {
     /// surface with the shared frame clock. The window is owned by the view on
     /// success and by the caller on failure.
     pub fn adoptView(self: *App, id: engine.ViewId, win: *window.Window) !*View {
-        const transparent = switch (win.role) {
-            .layer => true,
-            .toplevel, .popup => false,
-        };
+        // Every surface is presented with premultiplied alpha so translucent
+        // content shows through and background effects can be applied. A
+        // compositor that does not support it keeps the swapchain opaque.
         var surface = try vulkan.Surface.create(
             self.vk,
             @ptrCast(self.ctx.conn.display),
             @ptrCast(win.surface),
             win.physicalWidth(),
             win.physicalHeight(),
-            transparent,
+            true,
         );
         errdefer surface.destroy();
         surface.requestBufferScale(win.bufferScale());
@@ -853,6 +852,8 @@ pub const App = struct {
             .set_parent = bridgeSetParent,
             .update_position = bridgeUpdatePosition,
             .update_layer_surface = bridgeUpdateLayerSurface,
+            .set_background_effect = bridgeSetBackgroundEffect,
+            .remove_background_effect = bridgeRemoveBackgroundEffect,
             .get_size = bridgeGetSize,
             .get_state = bridgeGetState,
             .get_capabilities = bridgeGetCapabilities,
@@ -1161,6 +1162,34 @@ pub const App = struct {
             error.UnsupportedKeyboardInteractivity,
             => .invalid_argument,
         };
+        return .ok;
+    }
+
+    fn bridgeSetBackgroundEffect(
+        ctx: ?*anyopaque,
+        view_id: i64,
+        effect: windowing.BackgroundEffect,
+        region: *const windowing.Rect,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        if (region.width <= 0 or region.height <= 0) return .invalid_argument;
+        app.ctx.conn.setWindowBackgroundEffect(view.win, effect, region.*) catch |err| return switch (err) {
+            error.BackgroundEffectUnavailable => .unsupported,
+            else => .backend_failed,
+        };
+        view.win.commit();
+        return .ok;
+    }
+
+    fn bridgeRemoveBackgroundEffect(
+        ctx: ?*anyopaque,
+        view_id: i64,
+    ) windowing.Status {
+        const app: *App = @ptrCast(@alignCast(ctx.?));
+        const view = app.viewForId(view_id) orelse return .unknown_view;
+        app.ctx.conn.removeWindowBackgroundEffect(view.win);
+        view.win.commit();
         return .ok;
     }
 

@@ -172,6 +172,32 @@ reconfigure the surface.
 Without `bootstrap_layer`, the embedder bootstraps a toplevel and the first
 regular window adopts it. This is the engine's startup frame path.
 
+### Background effects
+
+Every controller exposes the background-effect API:
+
+```dart
+// Blur the whole window background. Coordinates are surface-local logical
+// pixels; the compositor clips the region to the surface.
+controller.setBackgroundEffect(
+  Offset.zero & controller.contentSize,
+  FiloBackgroundEffect.blur,
+);
+
+// Remove it again.
+controller.removeBackgroundEffect();
+```
+
+This uses the Wayland `ext-background-effect-v1` protocol. The effect is
+double-buffered and applies on the next frame. Only `FiloBackgroundEffect.blur`
+is currently defined. A compositor without the protocol (or without the blur
+capability) throws `FiloWindowingException` with an `unsupported` reason.
+
+Filo presents every surface with premultiplied alpha when the compositor
+supports it, so the effect is visible wherever the Flutter content is
+translucent. Layer windows already had this; toplevels and popups now use it
+too.
+
 The backend is responsible for the native archetypes: top-level windows,
 dialogs, popups, tooltips, and layer surfaces. Sizes, constraint adjustments,
 and anchor rectangles are passed through as package-owned values, so a backend
@@ -227,6 +253,7 @@ the embedder.
 | `FiloWindowObserver` | Synchronous per-window callbacks |
 | `FiloPositioner` and related types | Backend-facing positioner values |
 | `FiloLayerSurface` | Layer, anchors, margins, exclusive zone, keyboard mode |
+| `FiloBackgroundEffect` | Background effect kind (`blur`) |
 | `FiloLayerWindowController` | Controller for a wlr-layer-shell window |
 | `FiloLayerWindow` | Widget that renders a layer window |
 | `FiloWindowingException` | Backend operation failure |

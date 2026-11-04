@@ -9,6 +9,20 @@ import 'positioner.dart';
 /// The kind of native window a controller owns.
 enum FiloWindowKind { toplevel, popup, layer }
 
+/// A background effect the compositor can apply behind a translucent surface.
+///
+/// The values mirror the native ABI. Only blur is currently defined by
+/// `ext-background-effect-v1`.
+enum FiloBackgroundEffect {
+  /// Blur the compositor background behind the surface.
+  blur(0);
+
+  /// The native ABI value.
+  final int value;
+
+  const FiloBackgroundEffect(this.value);
+}
+
 enum FiloToplevelState {
   /// The surface is maximized.
   maximized(1),

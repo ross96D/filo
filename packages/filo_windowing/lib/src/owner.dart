@@ -69,7 +69,7 @@ class FiloWindowingOwner implements WindowingOwner {
   }
 
   @override
-  RegularWindowController createRegularWindowController({
+  FiloRegularWindowController createRegularWindowController({
     required RegularWindowControllerDelegate delegate,
     Size? size,
     BoxConstraints? constraints,
@@ -118,7 +118,7 @@ class FiloWindowingOwner implements WindowingOwner {
   }
 
   @override
-  DialogWindowController createDialogWindowController({
+  FiloDialogWindowController createDialogWindowController({
     required DialogWindowControllerDelegate delegate,
     Size? size,
     BoxConstraints? constraints,
@@ -140,7 +140,7 @@ class FiloWindowingOwner implements WindowingOwner {
   }
 
   @override
-  TooltipWindowController createTooltipWindowController({
+  FiloTooltipWindowController createTooltipWindowController({
     required TooltipWindowControllerDelegate delegate,
     required BoxConstraints constraints,
     required Rect anchorRect,
@@ -160,7 +160,7 @@ class FiloWindowingOwner implements WindowingOwner {
   }
 
   @override
-  PopupWindowController createPopupWindowController({
+  FiloPopupWindowController createPopupWindowController({
     required PopupWindowControllerDelegate delegate,
     required BoxConstraints constraints,
     required Rect anchorRect,

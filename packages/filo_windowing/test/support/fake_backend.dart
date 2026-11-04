@@ -101,6 +101,20 @@ class FakeBackend implements FiloWindowingBackend {
       calls.add('updateLayerSurface:$viewId:${surface.layer.name}');
 
   @override
+  void setBackgroundEffect(
+    int viewId,
+    FiloRect region,
+    FiloBackgroundEffect effect,
+  ) => calls.add(
+    'setBackgroundEffect:$viewId:${effect.name}:'
+    '${region.width.round()}x${region.height.round()}',
+  );
+
+  @override
+  void removeBackgroundEffect(int viewId) =>
+      calls.add('removeBackgroundEffect:$viewId');
+
+  @override
   void setParent(int viewId, int parentViewId) =>
       calls.add('setParent:$viewId:$parentViewId');
 }

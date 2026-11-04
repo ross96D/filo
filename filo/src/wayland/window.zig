@@ -3,6 +3,7 @@ const std = @import("std");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
+const ext = wayland.client.ext;
 const zwlr = wayland.client.zwlr;
 
 const engine = @import("../engine.zig");
@@ -35,6 +36,9 @@ pub const content_axis_height: u8 = 1 << 1;
 pub const Window = struct {
     surface: *wl.Surface,
     role: Role,
+    /// The ext-background-effect object for this surface, created lazily by
+    /// the first background-effect request. Null when none was ever requested.
+    background_effect: ?*ext.BackgroundEffectSurfaceV1 = null,
 
     configured: bool = false,
     /// Size the compositor last asked for, in surface (logical) pixels. Starts
@@ -213,6 +217,7 @@ pub const Window = struct {
     }
 
     pub fn destroy(self: *Window, allocator: std.mem.Allocator) void {
+        if (self.background_effect) |effect| effect.destroy();
         switch (self.role) {
             .toplevel => |toplevel| {
                 toplevel.toplevel.destroy();

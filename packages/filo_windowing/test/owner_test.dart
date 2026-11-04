@@ -23,34 +23,28 @@ void main() {
     owner = installFiloWindowing(backend: backend, viewResolver: (_) => view);
   });
 
-  test(
-    'a regular window adopts the implicit view and forwards its request',
-    () {
-      final delegate = _RegularDelegate();
-      final controller = owner.createRegularWindowController(
-        delegate: delegate,
-        size: const Size(800, 600),
-        constraints: const BoxConstraints(minWidth: 320, minHeight: 240),
-        title: 'hello',
-        resizable: true,
-      );
+  test('a regular window adopts the implicit view and forwards its request', () {
+    final delegate = _RegularDelegate();
+    final controller = owner.createRegularWindowController(
+      delegate: delegate,
+      size: const Size(800, 600),
+      constraints: const BoxConstraints(minWidth: 320, minHeight: 240),
+      title: 'hello',
+      resizable: true,
+    );
 
-      expect(controller.rootView, same(view));
-      expect(backend.lastViewId, 0);
-      expect(backend.observers.keys, contains(0));
+    expect(controller.rootView, same(view));
+    expect(backend.lastViewId, 0);
+    expect(backend.observers.keys, contains(0));
 
-      final request = backend.requests.single;
-      expect(request.kind, FiloWindowKind.toplevel);
-      expect(request.size, const Size(800, 600));
-      expect(
-        request.constraints,
-        const BoxConstraints(minWidth: 320, minHeight: 240),
-      );
-      expect(request.title, 'hello');
-      expect(request.preferredViewId, 0);
-      expect(request.parentViewId, -1);
-    },
-  );
+    final request = backend.requests.single;
+    expect(request.kind, FiloWindowKind.toplevel);
+    expect(request.size, const Size(800, 600));
+    expect(request.constraints, const BoxConstraints(minWidth: 320, minHeight: 240));
+    expect(request.title, 'hello');
+    expect(request.preferredViewId, 0);
+    expect(request.parentViewId, -1);
+  });
 
   test('sizedToContent controllers request content sizing', () {
     final regular = RegularWindowController.sizedToContent(
@@ -63,10 +57,7 @@ void main() {
     final regularRequest = backend.requests.last;
     expect(regularRequest.kind, FiloWindowKind.toplevel);
     expect(regularRequest.size, isNull);
-    expect(
-      regularRequest.constraints,
-      const BoxConstraints(minWidth: 120, minHeight: 80),
-    );
+    expect(regularRequest.constraints, const BoxConstraints(minWidth: 120, minHeight: 80));
     expect(regularRequest.sizedToContent, isTrue);
     expect(regularRequest.resizable, isFalse);
     expect(regularRequest.title, 'sized');
@@ -89,15 +80,11 @@ void main() {
   });
 
   test('a sizedToContent window can still request an explicit size', () {
-    final controller = RegularWindowController.sizedToContent(
-      delegate: _RegularDelegate(),
-    );
+    final controller = RegularWindowController.sizedToContent(delegate: _RegularDelegate());
     final id = backend.lastViewId!;
 
     controller.setSize(const Size(320, 200));
-    controller.setConstraints(
-      const BoxConstraints(minWidth: 100, minHeight: 80),
-    );
+    controller.setConstraints(const BoxConstraints(minWidth: 100, minHeight: 80));
 
     expect(backend.calls, contains('setSize:$id:320.0x200.0'));
     expect(backend.calls, contains('setConstraints:$id'));
@@ -174,10 +161,7 @@ void main() {
     var notified = 0;
     controller.addListener(() => notified++);
 
-    backend
-        .observerFor(id)
-        .onStateChanged
-        ?.call(FiloToplevelState.activated.mask);
+    backend.observerFor(id).onStateChanged?.call(FiloToplevelState.activated.mask);
 
     expect(notified, 1);
     expect(controller.isActivated, isTrue);
@@ -260,54 +244,79 @@ void main() {
     expect(notified, 1);
   });
 
-  test(
-    'a layer window adopts the implicit view and carries its layer surface',
-    () {
-      final delegate = _RegularDelegate();
-      final controller = owner.createLayerWindowController(
-        delegate: delegate,
-        layerSurface: FiloLayerSurface(
-          layer: FiloLayer.overlay,
-          anchors:
-              FiloLayerAnchors.top |
-              FiloLayerAnchors.left |
-              FiloLayerAnchors.right,
-          exclusiveZone: 32,
-          keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
-          margin: FiloInsets(top: 4, left: 8, right: 8),
-          output: 0,
-          namespace: 'filo-test',
-          acceptsInput: false,
-        ),
-        size: const Size(0, 32),
-      );
+  test('background effects go through the backend', () {
+    final controller = owner.createRegularWindowController(
+      delegate: _RegularDelegate(),
+      size: const Size(200, 100),
+      resizable: true,
+    );
+    final id = backend.lastViewId!;
 
-      expect(controller.rootView, same(view));
-      expect(backend.lastViewId, 0);
-      expect(controller.layerSurface.layer, FiloLayer.overlay);
+    controller.setBackgroundEffect(FiloRect(x: 0, y: 0, width: 200, height: 100));
+    controller.setBackgroundEffect(
+      FiloRect(x: 10, y: 20, width: 30, height: 40),
+      FiloBackgroundEffect.blur,
+    );
+    controller.removeBackgroundEffect();
 
-      final request = backend.requests.single;
-      expect(request.kind, FiloWindowKind.layer);
-      expect(request.preferredViewId, 0);
-      expect(request.resizable, isFalse);
-      expect(request.sizedToContent, isFalse);
+    expect(backend.calls, contains('setBackgroundEffect:$id:blur:200x100'));
+    expect(backend.calls, contains('setBackgroundEffect:$id:blur:30x40'));
+    expect(backend.calls, contains('removeBackgroundEffect:$id'));
+  });
 
-      final layer = request.layer!;
-      expect(layer.anchors.value, 1 | 4 | 8);
-      expect(layer.anchors.isTop, isTrue);
-      expect(layer.anchors.isBottom, isFalse);
-      expect(layer.exclusiveZone, 32);
-      expect(
-        layer.keyboardInteractivity,
-        FiloLayerKeyboardInteractivity.onDemand,
-      );
-      expect(layer.margin.top, 4);
-      expect(layer.margin.left, 8);
-      expect(layer.output, 0);
-      expect(layer.namespace, 'filo-test');
-      expect(layer.acceptsInput, isFalse);
-    },
-  );
+  test('factory-typed controllers expose background effects', () {
+    final controller = RegularWindowController(
+      delegate: _RegularDelegate(),
+      size: const Size(120, 80),
+    );
+    final id = backend.lastViewId!;
+
+    controller.setBackgroundEffect(FiloRect(x: 4, y: 8, width: 60, height: 40));
+    controller.removeBackgroundEffect();
+
+    expect(backend.calls, contains('setBackgroundEffect:$id:blur:60x40'));
+    expect(backend.calls, contains('removeBackgroundEffect:$id'));
+  });
+
+  test('a layer window adopts the implicit view and carries its layer surface', () {
+    final delegate = _RegularDelegate();
+    final controller = owner.createLayerWindowController(
+      delegate: delegate,
+      layerSurface: FiloLayerSurface(
+        layer: FiloLayer.overlay,
+        anchors: FiloLayerAnchors.top | FiloLayerAnchors.left | FiloLayerAnchors.right,
+        exclusiveZone: 32,
+        keyboardInteractivity: FiloLayerKeyboardInteractivity.onDemand,
+        margin: FiloInsets(top: 4, left: 8, right: 8),
+        output: 0,
+        namespace: 'filo-test',
+        acceptsInput: false,
+      ),
+      size: const Size(0, 32),
+    );
+
+    expect(controller.rootView, same(view));
+    expect(backend.lastViewId, 0);
+    expect(controller.layerSurface.layer, FiloLayer.overlay);
+
+    final request = backend.requests.single;
+    expect(request.kind, FiloWindowKind.layer);
+    expect(request.preferredViewId, 0);
+    expect(request.resizable, isFalse);
+    expect(request.sizedToContent, isFalse);
+
+    final layer = request.layer!;
+    expect(layer.anchors.value, 1 | 4 | 8);
+    expect(layer.anchors.isTop, isTrue);
+    expect(layer.anchors.isBottom, isFalse);
+    expect(layer.exclusiveZone, 32);
+    expect(layer.keyboardInteractivity, FiloLayerKeyboardInteractivity.onDemand);
+    expect(layer.margin.top, 4);
+    expect(layer.margin.left, 8);
+    expect(layer.output, 0);
+    expect(layer.namespace, 'filo-test');
+    expect(layer.acceptsInput, isFalse);
+  });
 
   test('a layer window can opt out of the implicit view', () {
     final optOutOwner = FiloWindowingOwner(
@@ -336,9 +345,7 @@ void main() {
     controller.setAnchors(FiloLayerAnchors.bottom);
     controller.setExclusiveZone(-1);
     controller.setMargins(const FiloInsets.all(6));
-    controller.setKeyboardInteractivity(
-      FiloLayerKeyboardInteractivity.exclusive,
-    );
+    controller.setKeyboardInteractivity(FiloLayerKeyboardInteractivity.exclusive);
     controller.setAcceptsInput(false);
     controller.setLayer(FiloLayer.bottom);
 
@@ -346,20 +353,11 @@ void main() {
     expect(controller.layerSurface.anchors.value, 2);
     expect(controller.layerSurface.exclusiveZone, -1);
     expect(controller.layerSurface.margin.bottom, 6);
-    expect(
-      controller.layerSurface.keyboardInteractivity,
-      FiloLayerKeyboardInteractivity.exclusive,
-    );
+    expect(controller.layerSurface.keyboardInteractivity, FiloLayerKeyboardInteractivity.exclusive);
     expect(controller.layerSurface.acceptsInput, isFalse);
     expect(backend.calls, contains('updateLayerSurface:$id:bottom'));
-    expect(
-      backend.calls.where((call) => call == 'updateLayerSurface:$id:bottom'),
-      hasLength(1),
-    );
-    expect(
-      backend.calls.where((call) => call == 'updateLayerSurface:$id:top'),
-      hasLength(5),
-    );
+    expect(backend.calls.where((call) => call == 'updateLayerSurface:$id:bottom'), hasLength(1));
+    expect(backend.calls.where((call) => call == 'updateLayerSurface:$id:top'), hasLength(5));
   });
 
   test('a dialog is a parented toplevel', () {
@@ -404,10 +402,7 @@ void main() {
         parentAnchor: WindowPositionerAnchor.bottom,
         childAnchor: WindowPositionerAnchor.top,
         offset: Offset(1, 2),
-        constraintAdjustment: WindowPositionerConstraintAdjustment(
-          slideX: true,
-          flipY: true,
-        ),
+        constraintAdjustment: WindowPositionerConstraintAdjustment(slideX: true, flipY: true),
       ),
       parent: regular,
     );
@@ -452,9 +447,7 @@ void main() {
     );
   });
 
-  testWidgets('FiloLayerWindow renders the controller root view', (
-    tester,
-  ) async {
+  testWidgets('FiloLayerWindow renders the controller root view', (tester) async {
     final controller = owner.createLayerWindowController(
       delegate: _RegularDelegate(),
       layerSurface: const FiloLayerSurface(),
@@ -464,19 +457,13 @@ void main() {
     await tester.pumpWidget(
       FiloLayerWindow(
         controller: controller,
-        child: const Directionality(
-          textDirection: TextDirection.ltr,
-          child: Text('layer content'),
-        ),
+        child: const Directionality(textDirection: TextDirection.ltr, child: Text('layer content')),
       ),
       wrapWithView: false,
     );
 
     expect(find.text('layer content'), findsOneWidget);
-    expect(
-      WindowScope.of(tester.element(find.text('layer content'))),
-      same(controller),
-    );
+    expect(WindowScope.of(tester.element(find.text('layer content'))), same(controller));
   });
 }
 

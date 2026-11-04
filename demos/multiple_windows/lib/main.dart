@@ -43,6 +43,12 @@ class _MultiWindowAppState extends State<MultiWindowApp> {
   final WindowSettings settings = WindowSettings();
 
   @override
+    void initState() {
+      controller.setBackgroundEffect(FiloRect.size(0, 0, FiloSize(10000, 10000)));
+      super.initState();
+    }
+
+  @override
   void dispose() {
     controller.dispose();
     super.dispose();

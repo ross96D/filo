@@ -236,6 +236,18 @@ external int _updatePosition(
 )
 external int _updateLayerSurface(int viewId, Pointer<_LayerSurface> layer);
 
+@Native<Int32 Function(Int64, Int32, Pointer<_Rect>)>(
+  symbol: 'filo_window_set_background_effect',
+)
+external int _setBackgroundEffect(
+  int viewId,
+  int effect,
+  Pointer<_Rect> region,
+);
+
+@Native<Int32 Function(Int64)>(symbol: 'filo_window_remove_background_effect')
+external int _removeBackgroundEffect(int viewId);
+
 //------------------------------------------------------------------------------
 // Native backend
 //------------------------------------------------------------------------------
@@ -465,6 +477,39 @@ class FiloNativeBackend implements FiloWindowingBackend {
     }
   }
 
+  @override
+  void setBackgroundEffect(
+    int viewId,
+    FiloRect region,
+    FiloBackgroundEffect effect,
+  ) {
+    if (region.width <= 0 || region.height <= 0) {
+      throw const FiloWindowingException(
+        'setBackgroundEffect failed: the region must be finite and non-empty',
+      );
+    }
+
+    final ptr = calloc<_Rect>();
+    try {
+      final ref = ptr.ref;
+      ref.x = region.x.clamp(_int32Min, _int32Max);
+      ref.y = region.y.clamp(_int32Min, _int32Max);
+      ref.width = region.width.clamp(_int32Min, _int32Max);
+      ref.height = region.height.clamp(_int32Min, _int32Max);
+      _check(
+        _setBackgroundEffect(viewId, effect.value, ptr),
+        'setBackgroundEffect',
+      );
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
+  @override
+  void removeBackgroundEffect(int viewId) {
+    _check(_removeBackgroundEffect(viewId), 'removeBackgroundEffect');
+  }
+
   void _forget(int viewId) {
     final record = _windows.remove(viewId);
     record?.observer?.close();
@@ -641,3 +686,9 @@ void _check(int status, String operation) {
   };
   throw FiloWindowingException('$operation failed: $reason');
 }
+
+/// The smallest value a native `int32_t` can hold.
+const int _int32Min = -0x80000000;
+
+/// The largest value a native `int32_t` can hold.
+const int _int32Max = 0x7fffffff;

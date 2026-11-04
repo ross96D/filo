@@ -41,7 +41,8 @@ fn addModules(
 
     // Generate Zig bindings for the core Wayland protocol, xdg-shell, the
     // cursor shapes the mouse cursor platform channel sets, wlr-layer-shell
-    // for layer windows, and xdg-activation for requesting window activation.
+    // for layer windows, xdg-activation for requesting window activation, and
+    // ext-background-effect for blurring behind translucent surfaces.
     const scanner = Scanner.create(b, .{
         .wayland_xml = Paths.get(b, prefix, "vendor/protocols/wayland.xml"),
         .wayland_protocols = Paths.get(b, prefix, "vendor/protocols"),
@@ -50,6 +51,7 @@ fn addModules(
     scanner.addCustomProtocol(Paths.get(b, prefix, "vendor/protocols/cursor-shape-v1.xml"));
     scanner.addCustomProtocol(Paths.get(b, prefix, "vendor/protocols/wlr-layer-shell-unstable-v1.xml"));
     scanner.addCustomProtocol(Paths.get(b, prefix, "vendor/protocols/xdg-activation-v1.xml"));
+    scanner.addCustomProtocol(Paths.get(b, prefix, "vendor/protocols/ext-background-effect-v1.xml"));
     scanner.generate("wl_compositor", 6);
     scanner.generate("xdg_wm_base", 6);
     scanner.generate("wl_seat", 8);
@@ -58,6 +60,7 @@ fn addModules(
     scanner.generate("wp_cursor_shape_manager_v1", 1);
     scanner.generate("zwlr_layer_shell_v1", 5);
     scanner.generate("xdg_activation_v1", 1);
+    scanner.generate("ext_background_effect_manager_v1", 1);
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
 

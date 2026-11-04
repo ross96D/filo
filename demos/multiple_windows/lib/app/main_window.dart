@@ -27,6 +27,7 @@ class MainWindow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface.withAlpha(180),
       appBar: AppBar(title: const Text('Multi Window Reference App')),
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
