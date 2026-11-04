@@ -226,6 +226,23 @@ pub const Connection = struct {
         if (self.display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
     }
 
+    /// The logical size of the first output, used as the ceiling for window
+    /// sizes. Falls back to a fixed value before the output mode is known.
+    pub fn maxContentSize(self: *const Connection) windowing.Size {
+        if (self.display_width == 0 or self.display_height == 0) {
+            return .{
+                .width = window.fallback_max_content_size,
+                .height = window.fallback_max_content_size,
+            };
+        }
+
+        const scale = @max(1, self.display_scale);
+        return .{
+            .width = @max(1, self.display_width / scale),
+            .height = @max(1, self.display_height / scale),
+        };
+    }
+
     /// Create a toplevel window on this connection.
     pub fn createWindow(self: *Connection) !*window.Window {
         const surface = try self.compositor.createSurface();
@@ -243,6 +260,7 @@ pub const Connection = struct {
                 .toplevel = toplevel,
             } },
             window.default_size,
+            self.maxContentSize(),
         );
     }
 
@@ -287,6 +305,11 @@ pub const Connection = struct {
         // region (the default) means the whole surface accepts input.
         try self.setSurfaceInputRegion(surface, options.state.accepts_input != 0);
 
+        const max_size = self.maxContentSize();
+        const size = windowing.Size{
+            .width = if (options.width == 0) 0 else @max(1, @min(options.width, max_size.width)),
+            .height = if (options.height == 0) 0 else @max(1, @min(options.height, max_size.height)),
+        };
         return window.Window.create(
             self.allocator,
             surface,
@@ -294,7 +317,8 @@ pub const Connection = struct {
                 .layer_surface = layer_surface,
                 .state = options.state,
             } },
-            .{ .width = options.width, .height = options.height },
+            size,
+            max_size,
         );
     }
 
@@ -391,6 +415,7 @@ pub const Connection = struct {
                 .popup = popup,
             } },
             window.default_size,
+            self.maxContentSize(),
         );
     }
 

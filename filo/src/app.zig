@@ -23,7 +23,6 @@ const vulkan = @import("vulkan.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 const mouse_cursor = @import("flutter/mouse_cursor.zig");
 const windowing = @import("windowing.zig");
-const max_content_size = @import("wayland/window.zig").max_content_size;
 
 /// One native window and the Flutter view rendered into it.
 pub const View = struct {
@@ -211,6 +210,10 @@ pub const App = struct {
     /// surface with the shared frame clock. The window is owned by the view on
     /// success and by the caller on failure.
     pub fn adoptView(self: *App, id: engine.ViewId, win: *window.Window) !*View {
+        // The output mode may only have arrived while `waitReady` was
+        // round-tripping, so refresh the ceiling before the view is added.
+        win.setMaxSize(self.ctx.conn.maxContentSize());
+
         // Every surface is presented with premultiplied alpha so translucent
         // content shows through and background effects can be applied. A
         // compositor that does not support it keeps the swapchain opaque.
@@ -260,8 +263,9 @@ pub const App = struct {
 
         // The initial configure normally carries the real size; these are the
         // fallback when the compositor leaves the choice to us.
-        if (width > 0) win.width = width;
-        if (height > 0) win.height = height;
+        const max_size = self.ctx.conn.maxContentSize();
+        if (width > 0) win.width = @min(width, max_size.width);
+        if (height > 0) win.height = @min(height, max_size.height);
         try self.ctx.conn.waitReady(win);
 
         const view = try self.adoptView(id, win);
@@ -272,6 +276,7 @@ pub const App = struct {
     /// Create a toplevel from a windowing request and apply its properties.
     fn createToplevel(self: *App, req: *windowing.WindowRequest) !*View {
         const sized_to_content = req.sized_to_content != 0;
+        const max_size = self.ctx.conn.maxContentSize();
         // The first regular window adopts the implicit view. If the embedder
         // did not bootstrap a toplevel (or the implicit surface has another
         // role), create one lazily and never AddView it.
@@ -284,16 +289,16 @@ pub const App = struct {
                     .popup, .layer => {},
                 }
             } else {
-                const initial_width = @max(1, @min(req.min_size.width, max_content_size));
-                const initial_height = @max(1, @min(req.min_size.height, max_content_size));
+                const initial_width = @max(1, @min(req.min_size.width, max_size.width));
+                const initial_height = @max(1, @min(req.min_size.height, max_size.height));
                 const width: u32 = if (req.size.width > 0)
-                    @min(req.size.width, max_content_size)
+                    @min(req.size.width, max_size.width)
                 else if (sized_to_content)
                     initial_width
                 else
                     800;
                 const height: u32 = if (req.size.height > 0)
-                    @min(req.size.height, max_content_size)
+                    @min(req.size.height, max_size.height)
                 else if (sized_to_content)
                     initial_height
                 else
@@ -312,16 +317,16 @@ pub const App = struct {
             }
         }
 
-        const initial_width = @max(1, @min(req.min_size.width, max_content_size));
-        const initial_height = @max(1, @min(req.min_size.height, max_content_size));
+        const initial_width = @max(1, @min(req.min_size.width, max_size.width));
+        const initial_height = @max(1, @min(req.min_size.height, max_size.height));
         const width: u32 = if (req.size.width > 0)
-            @min(req.size.width, max_content_size)
+            @min(req.size.width, max_size.width)
         else if (sized_to_content)
             initial_width
         else
             800;
         const height: u32 = if (req.size.height > 0)
-            @min(req.size.height, max_content_size)
+            @min(req.size.height, max_size.height)
         else if (sized_to_content)
             initial_height
         else
@@ -343,22 +348,22 @@ pub const App = struct {
         if (req.title) |title| toplevel.setTitle(title);
         view.setViewTitleZ(req.title);
 
-        if (sized_to_content) {
+        if (sized_to_content or req.resizable != 0) {
             // Until the first frame arrives, only the requested constraints
             // apply. A non-resizable sized-to-content window is pinned to its
             // content size once that size is known.
-            toplevel.setMinSize(req.min_size);
-            toplevel.setMaxSize(req.max_size);
-        } else if (req.resizable == 0) {
+            toplevel.setMinSize(view.win.contentMinSize());
+            toplevel.setMaxSize(view.win.contentMaxSize());
+        } else {
             const fixed = if (req.size.width > 0 and req.size.height > 0)
-                windowing.Size{ .width = req.size.width, .height = req.size.height }
+                windowing.Size{
+                    .width = @max(1, @min(req.size.width, view.win.max_width)),
+                    .height = @max(1, @min(req.size.height, view.win.max_height)),
+                }
             else
                 windowing.Size{ .width = view.win.width, .height = view.win.height };
             toplevel.setMinSize(fixed);
             toplevel.setMaxSize(fixed);
-        } else {
-            toplevel.setMinSize(req.min_size);
-            toplevel.setMaxSize(req.max_size);
         }
         // The xdg_toplevel requests above are double-buffered.
         view.win.commit();
@@ -392,22 +397,22 @@ pub const App = struct {
             toplevel.setTitle(title);
             view.setViewTitleZ(req.title);
         }
-        if (req.sized_to_content != 0) {
+        if (req.sized_to_content != 0 or req.resizable != 0) {
             // The content size is not known yet. Keep the requested bounds
             // until the first frame pins a non-resizable window to its content
             // size (see `runContentResize`).
-            toplevel.setMinSize(req.min_size);
-            toplevel.setMaxSize(req.max_size);
-        } else if (req.resizable == 0) {
+            toplevel.setMinSize(view.win.contentMinSize());
+            toplevel.setMaxSize(view.win.contentMaxSize());
+        } else {
             const fixed = if (req.size.width > 0 and req.size.height > 0)
-                windowing.Size{ .width = req.size.width, .height = req.size.height }
+                windowing.Size{
+                    .width = @max(1, @min(req.size.width, view.win.max_width)),
+                    .height = @max(1, @min(req.size.height, view.win.max_height)),
+                }
             else
                 windowing.Size{ .width = view.win.width, .height = view.win.height };
             toplevel.setMinSize(fixed);
             toplevel.setMaxSize(fixed);
-        } else {
-            toplevel.setMinSize(req.min_size);
-            toplevel.setMaxSize(req.max_size);
         }
         view.win.commit();
 
@@ -434,6 +439,7 @@ pub const App = struct {
     fn createPopup(self: *App, req: *const windowing.WindowRequest) !*View {
         if (req.parent_view_id < 0) return error.InvalidParent;
         const parent = self.viewForId(req.parent_view_id) orelse return error.UnknownParent;
+        const max_size = self.ctx.conn.maxContentSize();
 
         var positioner = req.positioner;
         if (positioner.size.width == 0 or positioner.size.height == 0) positioner.size = req.size;
@@ -444,15 +450,15 @@ pub const App = struct {
             // The positioner's size is the initial surface size. It has to
             // satisfy the engine's minimum constraint until the first frame
             // reports the content size.
-            positioner.size.width = @max(positioner.size.width, @max(1, @min(req.min_size.width, 16_384)));
-            positioner.size.height = @max(positioner.size.height, @max(1, @min(req.min_size.height, 16_384)));
+            positioner.size.width = @max(positioner.size.width, @max(1, @min(req.min_size.width, max_size.width)));
+            positioner.size.height = @max(positioner.size.height, @max(1, @min(req.min_size.height, max_size.height)));
         }
 
         const xdg_positioner = try makePositioner(self, positioner);
         defer xdg_positioner.destroy();
 
-        const width: u32 = @min(positioner.size.width, 16_384);
-        const height: u32 = @min(positioner.size.height, 16_384);
+        const width: u32 = @min(positioner.size.width, max_size.width);
+        const height: u32 = @min(positioner.size.height, max_size.height);
 
         const view = try self.createPopupView(parent, xdg_positioner, width, height);
         errdefer self.destroyView(view);
@@ -550,7 +556,7 @@ pub const App = struct {
             break :blk outputs[index];
         };
 
-        const size = layerRequestSize(req);
+        const size = layerRequestSize(req, self.ctx.conn.maxContentSize());
         return self.ctx.conn.createLayer(.{
             .state = state,
             .output = output,
@@ -567,7 +573,7 @@ pub const App = struct {
         view.engine_state = .added;
 
         const state = req.layer_surface;
-        const size = layerRequestSize(req);
+        const size = layerRequestSize(req, self.ctx.conn.maxContentSize());
         const current = view.win.role.layer.state;
 
         // Always refresh the sizing state: the new isolate may carry different
@@ -1011,8 +1017,8 @@ pub const App = struct {
         view.win.setContentConstraints(min, max);
         switch (view.win.role) {
             .toplevel => |*toplevel| {
-                toplevel.setMinSize(min);
-                toplevel.setMaxSize(max);
+                toplevel.setMinSize(view.win.contentMinSize());
+                toplevel.setMaxSize(view.win.contentMaxSize());
             },
             .popup, .layer => {},
         }
@@ -1289,8 +1295,9 @@ fn layerDimension(
     sized_to_content: bool,
     minimum: u32,
     fallback: u32,
+    limit: u32,
 ) u32 {
-    if (requested != 0) return @min(requested, 16_384);
+    if (requested != 0) return @min(requested, limit);
     // Anchoring to opposite edges makes the compositor own the dimension, even
     // when the window otherwise sizes to its content.
     if (opposite_anchors) return 0;
@@ -1299,7 +1306,7 @@ fn layerDimension(
 }
 
 /// The size to request for a layer surface, following its anchors.
-fn layerRequestSize(req: *const windowing.WindowRequest) windowing.Size {
+fn layerRequestSize(req: *const windowing.WindowRequest, max_size: windowing.Size) windowing.Size {
     const state = req.layer_surface;
     const anchors = state.anchor;
     const horizontal = anchors & windowing.LayerAnchor.left != 0 and
@@ -1312,15 +1319,17 @@ fn layerRequestSize(req: *const windowing.WindowRequest) windowing.Size {
             req.size.width,
             horizontal,
             sized_to_content,
-            @max(1, @min(req.min_size.width, max_content_size)),
+            @max(1, @min(req.min_size.width, max_size.width)),
             800,
+            max_size.width,
         ),
         .height = layerDimension(
             req.size.height,
             vertical,
             sized_to_content,
-            @max(1, @min(req.min_size.height, max_content_size)),
+            @max(1, @min(req.min_size.height, max_size.height)),
             600,
+            max_size.height,
         ),
     };
 }
@@ -1386,11 +1395,12 @@ fn runContentResize(user_data: ?*anyopaque) void {
     }
 
     // `req` is the extent the raster thread drew at, in physical pixels.
-    const physical_width = @max(1, @min(req.width, 16_384));
-    const physical_height = @max(1, @min(req.height, 16_384));
-    // Wayland surface and positioner sizes are surface-local/logical.
-    const width = scale.logical(physical_width, view.win.pixel_ratio);
-    const height = scale.logical(physical_height, view.win.pixel_ratio);
+    const physical_width = @max(1, req.width);
+    const physical_height = @max(1, req.height);
+    // Wayland surface and positioner sizes are surface-local/logical. Cap the
+    // result to the first-output maximum.
+    const width = @max(1, @min(scale.logical(physical_width, view.win.pixel_ratio), view.win.max_width));
+    const height = @max(1, @min(scale.logical(physical_height, view.win.pixel_ratio), view.win.max_height));
 
     switch (view.win.role) {
         .popup => |*popup| {
@@ -1960,15 +1970,16 @@ fn stopLoop(user_data: ?*anyopaque) void {
 test "a layer dimension follows its anchors before content sizing" {
     const testing = std.testing;
 
-    // An explicit size wins.
-    try testing.expectEqual(@as(u32, 320), layerDimension(320, true, true, 10, 800));
+    // An explicit size wins until it reaches the output limit.
+    try testing.expectEqual(@as(u32, 320), layerDimension(320, true, true, 10, 800, 1920));
+    try testing.expectEqual(@as(u32, 1920), layerDimension(2560, true, true, 10, 800, 1920));
     // Opposite anchors hand the dimension to the compositor, even for a
     // content-sized surface.
-    try testing.expectEqual(@as(u32, 0), layerDimension(0, true, true, 10, 800));
+    try testing.expectEqual(@as(u32, 0), layerDimension(0, true, true, 10, 800, 1920));
     // Content sizing without opposite anchors uses the minimum as a
     // placeholder until the first frame.
-    try testing.expectEqual(@as(u32, 10), layerDimension(0, false, true, 10, 800));
+    try testing.expectEqual(@as(u32, 10), layerDimension(0, false, true, 10, 800, 1920));
     // Otherwise a sane default keeps the initial commit valid.
-    try testing.expectEqual(@as(u32, 800), layerDimension(0, false, false, 10, 800));
-    try testing.expectEqual(@as(u32, 1), layerDimension(0, false, true, 0, 800));
+    try testing.expectEqual(@as(u32, 800), layerDimension(0, false, false, 10, 800, 1920));
+    try testing.expectEqual(@as(u32, 1), layerDimension(0, false, true, 0, 800, 1920));
 }

@@ -17,8 +17,8 @@ const default_height = 600;
 /// The size a window starts with when the compositor leaves it to us.
 pub const default_size = windowing.Size{ .width = default_width, .height = default_height };
 
-/// The largest size a popup or content-sized window can ask the engine for.
-pub const max_content_size = 4_096;
+/// The fallback maximum when no output size is known yet.
+pub const fallback_max_content_size = 2_048;
 
 /// The fallback buffer scale before the compositor has reported one. The
 /// connection replaces it with `wl_surface.preferred_buffer_scale`, or
@@ -67,8 +67,16 @@ pub const Window = struct {
     /// pixels. `metricsConstraints` converts them to physical pixels.
     content_min_width: u32 = 1,
     content_min_height: u32 = 1,
-    content_max_width: u32 = max_content_size,
-    content_max_height: u32 = max_content_size,
+    content_max_width: u32 = fallback_max_content_size,
+    content_max_height: u32 = fallback_max_content_size,
+    /// The maximum logical size of the first output. It caps unbounded
+    /// content, initial sizes and explicit resize requests. Explicit
+    /// window-size constraints are still respected.
+    max_width: u32 = fallback_max_content_size,
+    max_height: u32 = fallback_max_content_size,
+    /// The max from the windowing request. Zero means unbounded.
+    requested_max_width: u32 = 0,
+    requested_max_height: u32 = 0,
     /// Set by a configure that changed the size, drained by the event loop,
     /// which forwards it to the engine.
     resized: bool = false,
@@ -186,14 +194,19 @@ pub const Window = struct {
         surface: *wl.Surface,
         role: Role,
         size: windowing.Size,
+        max_size: windowing.Size,
     ) !*Window {
         const self = try allocator.create(Window);
         errdefer allocator.destroy(self);
         self.* = .{
             .surface = surface,
             .role = role,
-            .width = size.width,
-            .height = size.height,
+            .width = if (size.width == 0) 0 else @min(size.width, max_size.width),
+            .height = if (size.height == 0) 0 else @min(size.height, max_size.height),
+            .content_max_width = max_size.width,
+            .content_max_height = max_size.height,
+            .max_width = max_size.width,
+            .max_height = max_size.height,
         };
 
         switch (self.role) {
@@ -280,9 +293,11 @@ pub const Window = struct {
     pub fn requestLayerSize(self: *Window, size: windowing.Size) void {
         const layer = &self.role.layer;
         const anchors = layer.state.anchor;
-        if (!stretchesWidth(anchors)) self.width = size.width;
-        if (!stretchesHeight(anchors)) self.height = size.height;
-        layer.layer_surface.setSize(size.width, size.height);
+        const width = if (size.width == 0) 0 else @max(1, @min(size.width, self.max_width));
+        const height = if (size.height == 0) 0 else @max(1, @min(size.height, self.max_height));
+        if (!stretchesWidth(anchors)) self.width = width;
+        if (!stretchesHeight(anchors)) self.height = height;
+        layer.layer_surface.setSize(width, height);
         self.resized = true;
         self.commit();
     }
@@ -318,12 +333,37 @@ pub const Window = struct {
     }
 
     /// Update the limits used for engine metrics. A zero maximum means
-    /// unbounded, matching the ABI's encoding.
+    /// unbounded, matching the ABI's encoding. An unbounded maximum is capped
+    /// to the window's output size; an explicit maximum is respected.
     pub fn setContentConstraints(self: *Window, min: windowing.Size, max: windowing.Size) void {
         self.content_min_width = boundedMin(min.width);
         self.content_min_height = boundedMin(min.height);
-        self.content_max_width = boundedMax(max.width, self.content_min_width);
-        self.content_max_height = boundedMax(max.height, self.content_min_height);
+        self.requested_max_width = max.width;
+        self.requested_max_height = max.height;
+        self.recomputeContentMax();
+    }
+
+    /// Replace the first-output maximum, preserving the requested constraints.
+    /// Used after `waitReady`, when the output mode is finally known.
+    pub fn setMaxSize(self: *Window, max: windowing.Size) void {
+        self.max_width = @max(1, max.width);
+        self.max_height = @max(1, max.height);
+        self.recomputeContentMax();
+    }
+
+    fn recomputeContentMax(self: *Window) void {
+        self.content_max_width = boundedMax(self.requested_max_width, self.content_min_width, self.max_width);
+        self.content_max_height = boundedMax(self.requested_max_height, self.content_min_height, self.max_height);
+    }
+
+    /// The effective minimum as a windowing size.
+    pub fn contentMinSize(self: *const Window) windowing.Size {
+        return .{ .width = self.content_min_width, .height = self.content_min_height };
+    }
+
+    /// The effective maximum as a windowing size.
+    pub fn contentMaxSize(self: *const Window) windowing.Size {
+        return .{ .width = self.content_max_width, .height = self.content_max_height };
     }
 
     pub fn isSizedToContent(self: *const Window) bool {
@@ -408,9 +448,11 @@ pub const Window = struct {
     /// Only content-sized axes are updated; a layer axis owned by the
     /// compositor keeps its configured size.
     pub fn applyContentSize(self: *Window, width: u32, height: u32) void {
+        const clamped_width = @max(1, @min(width, self.max_width));
+        const clamped_height = @max(1, @min(height, self.max_height));
         const axes = self.content_axes.load(.acquire);
-        if (axes & content_axis_width != 0) self.width = width;
-        if (axes & content_axis_height != 0) self.height = height;
+        if (axes & content_axis_width != 0) self.width = clamped_width;
+        if (axes & content_axis_height != 0) self.height = clamped_height;
 
         switch (self.role) {
             .layer => |*layer| {
@@ -442,13 +484,14 @@ pub const Window = struct {
     /// content-sizing mode and asks the engine to draw at the requested size.
     pub fn applyRequestedSize(self: *Window, size: windowing.Size) void {
         self.stopSizingToContent();
-        self.width = size.width;
-        self.height = size.height;
+        self.width = @max(1, @min(size.width, self.max_width));
+        self.height = @max(1, @min(size.height, self.max_height));
+        const clamped = windowing.Size{ .width = self.width, .height = self.height };
         if (!self.resizable) {
             switch (self.role) {
                 .toplevel => |*toplevel| {
-                    toplevel.setMinSize(size);
-                    toplevel.setMaxSize(size);
+                    toplevel.setMinSize(clamped);
+                    toplevel.setMaxSize(clamped);
                 },
                 .popup, .layer => {},
             }
@@ -471,12 +514,12 @@ pub const Window = struct {
     }
 
     fn boundedMin(value: u32) u32 {
-        return @max(1, @min(value, max_content_size));
+        return @max(1, value);
     }
 
-    fn boundedMax(value: u32, min: u32) u32 {
-        if (value == 0) return max_content_size;
-        return @max(min, @min(value, max_content_size));
+    fn boundedMax(value: u32, min: u32, limit: u32) u32 {
+        if (value == 0) return @max(min, limit);
+        return @max(min, value);
     }
 
     /// Apply the queued xdg requests.

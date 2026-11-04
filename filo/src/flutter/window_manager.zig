@@ -38,6 +38,8 @@ pub const WindowManager = struct {
         if (std.mem.eql(u8, method_value.string, "create")) {
             const width = intArg(args, "width") orelse 800;
             const height = intArg(args, "height") orelse 600;
+            // Absolute safety cap; the native window clamps the actual size to
+            // the first output.
             self.create(
                 self.user_data,
                 @intCast(std.math.clamp(width, 1, 16_384)),
