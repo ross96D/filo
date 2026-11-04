@@ -38,6 +38,7 @@ may create a new view and return another id.
 | `sizedToContent` | Whether the backend derives the window size from its content |
 | `modal` | Whether a dialog is modal to `parentViewId` |
 | `decorated` | Whether the window has decorations |
+| `grab` | Request an explicit `xdg_popup.grab`; tooltips should leave this false |
 | `title` | Initial title |
 | `parentViewId` | Parent window view id, or -1 |
 | `preferredViewId` | Suggested view id to adopt (usually 0), or -1 |

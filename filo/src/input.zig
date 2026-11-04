@@ -122,7 +122,6 @@ pub const Input = struct {
             self.eng.sendViewFocusEvent(previous, .unfocused, .none);
         }
         self.focused_view = view_id;
-        std.debug.print("filo: view {} gained focus\n", .{view_id});
         self.eng.sendViewFocusEvent(view_id, .focused, .none);
     }
 
@@ -131,7 +130,6 @@ pub const Input = struct {
     pub fn keyboardLeave(self: *Input) void {
         const view_id = self.focused_view orelse return;
         self.focused_view = null;
-        std.debug.print("filo: view {} lost focus\n", .{view_id});
         self.eng.sendViewFocusEvent(view_id, .unfocused, .none);
     }
 

@@ -116,6 +116,9 @@ final class _WindowRequest extends Struct {
   @Uint8()
   external int decorated;
 
+  @Uint8()
+  external int grab;
+
   external Pointer<Utf8> title;
 
   @Int64()
@@ -290,6 +293,7 @@ class FiloNativeBackend implements FiloWindowingBackend {
       ref.sizedToContent = request.sizedToContent ? 1 : 0;
       ref.modal = request.modal ? 1 : 0;
       ref.decorated = request.decorated ? 1 : 0;
+      ref.grab = request.grab ? 1 : 0;
       ref.title = titlePtr;
       ref.parentViewId = request.parentViewId;
       ref.preferredViewId = request.preferredViewId;

@@ -29,6 +29,8 @@ pub const View = struct {
     id: engine.ViewId,
     win: *window.Window,
     surface: vulkan.Surface,
+    /// The view this popup is attached to, or -1 for toplevels and layers.
+    parent_view_id: engine.ViewId = -1,
     /// Where this view is in the engine's AddView/RemoveView lifecycle.
     engine_state: EngineState = .adding,
     /// A close request arrived before AddView completed; apply it after add.
@@ -175,6 +177,12 @@ pub const App = struct {
     next_view_id: engine.ViewId = 1,
     /// Whether a windowing controller has adopted the implicit view (id 0).
     implicit_adopted: bool = false,
+    /// The popup currently holding an explicit xdg_popup grab, if any.
+    ///
+    /// The compositor tracks this too, but an invalid grab is a fatal protocol
+    /// error, so the client has to decide before sending the request. Only one
+    /// grab chain exists per seat, and this embedder binds one seat.
+    active_grab_view: ?engine.ViewId = null,
     /// Whether `ctx` has been filled in. `deinitViews` also runs after a failed
     /// engine initialization, before the context exists.
     ctx_ready: bool = false,
@@ -459,15 +467,41 @@ pub const App = struct {
 
         const width: u32 = @min(positioner.size.width, max_size.width);
         const height: u32 = @min(positioner.size.height, max_size.height);
+        const grab = req.grab != 0 and self.ctx.conn.canGrab() and self.mayGrabPopup(parent);
 
-        const view = try self.createPopupView(parent, xdg_positioner, width, height);
+        const view = try self.createPopupView(parent, xdg_positioner, width, height, grab);
         errdefer self.destroyView(view);
+        view.parent_view_id = parent.id;
+        if (grab) {
+            view.win.role.popup.grabbing = true;
+            self.active_grab_view = view.id;
+        }
         view.win.applyRequest(req);
 
         view.win.role.popup.positioner = positioner;
         view.win.resized = false;
         view.win.role.popup.offset_dirty = false;
         return view;
+    }
+
+    /// Whether a new popup may request an explicit grab.
+    ///
+    /// xdg-shell allows only one grab chain per seat: the first grab starts at
+    /// the toplevel, and later grabs must be nested under the popup that
+    /// currently holds it. An invalid grab is a fatal protocol error.
+    fn mayGrabPopup(self: *App, parent: *View) bool {
+        if (self.active_grab_view) |active| {
+            if (active != parent.id) return false;
+            return switch (parent.win.role) {
+                .popup => |popup| popup.grabbing,
+                .toplevel, .layer => false,
+            };
+        }
+        return switch (parent.win.role) {
+            .toplevel => true,
+            .popup => |popup| popup.grabbing,
+            .layer => false,
+        };
     }
 
     /// Open a popup window attached to `parent` and register a view for it.
@@ -477,9 +511,10 @@ pub const App = struct {
         positioner: *xdg.Positioner,
         width: u32,
         height: u32,
+        grab: bool,
     ) !*View {
         const id = self.reserveViewId();
-        const win = try self.ctx.conn.createPopup(parent.win, positioner);
+        const win = try self.ctx.conn.createPopup(parent.win, positioner, grab);
         errdefer win.destroy(self.ctx.allocator);
 
         if (width > 0) win.width = width;
@@ -658,6 +693,7 @@ pub const App = struct {
     /// Destroy a view and everything it owns. Call only after the engine has
     /// released the view (or while tearing down an engine that never had it).
     fn destroyView(self: *App, view: *View) void {
+        self.clearGrab(view);
         _ = self.views_by_id.remove(view.id);
         _ = self.views_by_surface.remove(view.win.surface);
         for (self.views.items, 0..) |item, index| {
@@ -671,6 +707,28 @@ pub const App = struct {
         view.surface.destroy();
         view.win.destroy(self.ctx.allocator);
         self.ctx.allocator.destroy(view);
+    }
+
+    /// Release the explicit grab tracked for `view`. When this popup was
+    /// nested, the grab returns to its parent popup.
+    fn clearGrab(self: *App, view: *View) void {
+        const popup = switch (view.win.role) {
+            .popup => |*popup| popup,
+            .toplevel, .layer => return,
+        };
+        if (!popup.grabbing) return;
+        popup.grabbing = false;
+        if (self.active_grab_view != view.id) return;
+
+        self.active_grab_view = null;
+        if (view.parent_view_id < 0) return;
+        const parent = self.viewForId(view.parent_view_id) orelse return;
+        switch (parent.win.role) {
+            .popup => |parent_popup| {
+                if (parent_popup.grabbing) self.active_grab_view = parent.id;
+            },
+            .toplevel, .layer => {},
+        }
     }
 
     pub fn deinitViews(self: *App) void {
@@ -1468,6 +1526,7 @@ fn runViewOp(user_data: ?*anyopaque) void {
         },
         .remove => if (op.ok) {
             std.debug.print("filo: view {} removed\n", .{view.id});
+            app.clearGrab(view);
             if (view.callbacks.on_destroy) |on_destroy| on_destroy();
             app.destroyView(view);
         } else {
@@ -1889,6 +1948,7 @@ fn afterDispatch(self: *App, loop: *ev.Loop) void {
             .popup => |*popup| {
                 if (popup.done) {
                     popup.done = false;
+                    self.clearGrab(view);
                     view.destroy_requested = true;
                 }
             },

@@ -378,6 +378,7 @@ class FiloWindowRequest {
     this.sizedToContent = false,
     this.modal = false,
     this.decorated = true,
+    this.grab = false,
     this.title,
     this.parentViewId = -1,
     this.preferredViewId = -1,
@@ -410,6 +411,12 @@ class FiloWindowRequest {
 
   /// Whether the window has decorations.
   final bool decorated;
+
+  /// Whether the backend should request an explicit `xdg_popup.grab`.
+  ///
+  /// Only meaningful for [FiloWindowKind.popup]. Tooltips should leave this
+  /// false. The backend may ignore it when the grab chain would be invalid.
+  final bool grab;
 
   /// Initial title, if any.
   final String? title;

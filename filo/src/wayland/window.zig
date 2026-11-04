@@ -158,6 +158,8 @@ pub const Window = struct {
         configure_seen: bool = false,
         /// The compositor dismissed the popup.
         done: bool = false,
+        /// This popup currently holds an explicit `xdg_popup.grab`.
+        grabbing: bool = false,
         /// The last positioner applied to the popup, so an update can change
         /// just the anchor rectangle.
         positioner: windowing.Positioner = std.mem.zeroes(windowing.Positioner),
@@ -527,22 +529,11 @@ pub const Window = struct {
         self.surface.commit();
     }
 
-    /// Forward a size the compositor asked for to the engine, and/or new
-    /// buffer-scale metrics, in the physical pixels the embedder ABI expects.
-    /// The swapchain itself is not touched here: it follows the size the engine
-    /// says it draws at (see `vulkan.Surface.acquire`), which is what the
-    /// metrics below tell it, so there is nothing to hand over between threads.
     pub fn applyResize(self: *Window, eng: *engine.Engine, view_id: engine.ViewId) void {
         if (!self.resized and !self.scale_dirty) return;
         self.resized = false;
         self.scale_dirty = false;
 
-        std.debug.print("filo: view {} resized to {}x{} logical at scale {d}\n", .{
-            view_id,
-            self.width,
-            self.height,
-            self.pixel_ratio,
-        });
         eng.sendWindowMetricsForView(
             view_id,
             self.physicalWidth(),
@@ -550,10 +541,6 @@ pub const Window = struct {
             self.pixel_ratio,
             self.metricsConstraints(),
         );
-        // A window metrics event makes the framework relayout and schedule a
-        // frame on its own; asking for one anyway means a resize can never be
-        // left unpainted.
-        eng.scheduleFrame();
     }
 
     /// The compositor's per-surface buffer-scale preference. It is the

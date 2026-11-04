@@ -455,6 +455,7 @@ void main() {
     expect(request.parentViewId, regularId);
     expect(request.decorated, isFalse);
     expect(request.resizable, isFalse);
+    expect(request.grab, isTrue);
 
     final positioner = request.positioner!;
     expect(positioner.size.width, 200);
@@ -468,6 +469,26 @@ void main() {
     expect(positioner.offset!.x, 1);
     expect(positioner.offset!.y, 2);
     expect(positioner.constrainsAdjustments!.value, 1 | 8);
+  });
+
+  test('a tooltip does not request a grab', () {
+    final regular = owner.createRegularWindowController(
+      delegate: _RegularDelegate(),
+      size: const Size(100, 100),
+      resizable: true,
+    );
+
+    owner.createTooltipWindowController(
+      delegate: TooltipWindowControllerDelegate(),
+      constraints: const BoxConstraints(minWidth: 40, minHeight: 20),
+      anchorRect: const Rect.fromLTWH(4, 8, 10, 12),
+      positioner: const WindowPositioner(),
+      parent: regular,
+    );
+
+    final request = backend.requests.last;
+    expect(request.kind, FiloWindowKind.popup);
+    expect(request.grab, isFalse);
   });
 
   test('satellites are unsupported', () {

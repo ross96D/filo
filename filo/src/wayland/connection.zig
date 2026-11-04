@@ -374,6 +374,12 @@ pub const Connection = struct {
         if (win.background_effect) |effect_surface| effect_surface.setBlurRegion(null);
     }
 
+    /// Whether an explicit popup grab can be sent right now: there must be a
+    /// seat and a recent input serial from the action that opened the popup.
+    pub fn canGrab(self: *const Connection) bool {
+        return self.seat != null and self.last_serial != null;
+    }
+
     /// Create a popup attached to `parent` and positioned by `positioner`. The
     /// positioner is only needed for this call; the caller may destroy it once
     /// this returns.
@@ -381,6 +387,7 @@ pub const Connection = struct {
         self: *Connection,
         parent: *window.Window,
         positioner: *xdg.Positioner,
+        grab: bool,
     ) !*window.Window {
         const surface = try self.compositor.createSurface();
         errdefer surface.destroy();
@@ -401,10 +408,10 @@ pub const Connection = struct {
             .toplevel, .popup => {},
         }
 
-        // A grab is what lets the compositor dismiss the popup on an outside
-        // click. It needs the serial of the input event that opened it.
-        if (self.seat) |seat| {
-            if (self.last_serial) |serial| popup.grab(seat, serial);
+        if (grab) {
+            if (self.seat) |seat| {
+                if (self.last_serial) |serial| popup.grab(seat, serial);
+            }
         }
 
         return window.Window.create(

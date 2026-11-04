@@ -120,6 +120,9 @@ pub const WindowRequest = extern struct {
     sized_to_content: u8,
     modal: u8,
     decorated: u8,
+    /// Request an explicit `xdg_popup.grab` with the last input serial. Ignored
+    /// for toplevels and layer surfaces.
+    grab: u8,
     /// NUL-terminated, nullable. Copied before the call returns.
     title: ?[*:0]const u8,
     /// -1 means no parent.

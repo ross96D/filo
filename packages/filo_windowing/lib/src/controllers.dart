@@ -485,6 +485,7 @@ class FiloTooltipWindowController extends TooltipWindowController
         constraints: constraints,
         resizable: false,
         decorated: false,
+        grab: false,
         sizedToContent: true,
         parentViewId: parent.rootView.viewId,
         positioner: _toFiloPositioner(positioner, anchorRect, constraints),
@@ -523,6 +524,7 @@ class FiloPopupWindowController extends PopupWindowController
     required BoxConstraints constraints,
     required Rect anchorRect,
     required WindowPositioner positioner,
+    this.grab = true,
   }) : _delegate = delegate,
        super.empty() {
     final handle = backend.createWindow(
@@ -531,6 +533,7 @@ class FiloPopupWindowController extends PopupWindowController
         constraints: constraints,
         resizable: false,
         decorated: false,
+        grab: grab,
         sizedToContent: true,
         parentViewId: parent.rootView.viewId,
         positioner: _toFiloPositioner(positioner, anchorRect, constraints),
@@ -554,6 +557,9 @@ class FiloPopupWindowController extends PopupWindowController
 
   @override
   final BaseWindowController parent;
+
+  /// Whether this popup requests an explicit xdg_popup grab.
+  final bool grab;
 
   PopupWindowControllerDelegate get delegate => _delegate;
 }
