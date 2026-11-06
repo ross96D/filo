@@ -31,6 +31,8 @@ pub const View = struct {
     surface: vulkan.Surface,
     /// The view this popup is attached to, or -1 for toplevels and layers.
     parent_view_id: engine.ViewId = -1,
+    /// Popup only field. Indicate if the popup was created with a grab.
+    grabbed: bool = false,
     /// Where this view is in the engine's AddView/RemoveView lifecycle.
     engine_state: EngineState = .adding,
     /// A close request arrived before AddView completed; apply it after add.
@@ -189,7 +191,7 @@ pub const App = struct {
     /// Read by the vsync callback on the engine's raster thread, so it is
     /// written before the engine can ask for a frame and cleared under the same
     /// atomic when it is torn down.
-    engine: std.atomic.Value(?*engine.Engine) = std.atomic.Value(?*engine.Engine).init(null),
+    engine: ?*engine.Engine,
     channels: platform_channel.Registry,
     compositor: c.FlutterCompositor = undefined,
 
@@ -521,7 +523,9 @@ pub const App = struct {
         if (height > 0) win.height = height;
         try self.ctx.conn.waitReady(win);
 
-        return try self.adoptView(id, win);
+        const view = try self.adoptView(id, win);
+        view.grabbed = grab;
+        return view;
     }
 
     /// Create a wlr-layer-shell surface from a windowing request.
@@ -652,35 +656,6 @@ pub const App = struct {
         return view;
     }
 
-    /// Create a view and tell the engine about it. Resources exist before the
-    /// asynchronous add starts, so a frame presented for it can always find its
-    /// surface.
-    pub fn spawnView(self: *App, width: u32, height: u32) !*View {
-        const view = try self.createView(width, height);
-        self.beginAddView(view) catch |err| {
-            self.destroyView(view);
-            return err;
-        };
-        return view;
-    }
-
-    fn beginAddView(self: *App, view: *View) !void {
-        const op = try self.ctx.allocator.create(ViewOp);
-        op.* = .{ .app = self, .view = view, .kind = .add };
-        self.ctx.eng.addView(
-            view.id,
-            view.win.physicalWidth(),
-            view.win.physicalHeight(),
-            view.win.pixel_ratio,
-            view.win.metricsConstraints(),
-            op,
-            addViewCallback,
-        ) catch |err| {
-            self.ctx.allocator.destroy(op);
-            return err;
-        };
-    }
-
     fn beginRemoveView(self: *App, view: *View) !void {
         const op = try self.ctx.allocator.create(ViewOp);
         op.* = .{ .app = self, .view = view, .kind = .remove };
@@ -781,7 +756,7 @@ pub const App = struct {
     /// Queue a view-operation result for the Wayland/Vulkan thread. The engine
     /// callbacks run on its own thread; nothing here may touch a surface.
     fn postViewOp(self: *App, op: *ViewOp) void {
-        const eng = self.engine.load(.acquire) orelse {
+        const eng = self.engine orelse {
             // The engine is shutting down; the resources are released by
             // `deinitViews` instead.
             self.ctx.allocator.destroy(op);
@@ -806,7 +781,7 @@ pub const App = struct {
             .height = height,
         };
 
-        const eng = self.engine.load(.acquire) orelse {
+        const eng = self.engine orelse {
             std.heap.c_allocator.destroy(req);
             view.content_resize_pending.store(false, .release);
             return;
@@ -1503,13 +1478,6 @@ fn runContentResize(user_data: ?*anyopaque) void {
     view.content_resize_pending.store(false, .release);
 }
 
-fn addViewCallback(result: [*c]const c.FlutterAddViewResult) callconv(.c) void {
-    if (result == null or result.*.user_data == null) return;
-    const op: *ViewOp = @ptrCast(@alignCast(result.*.user_data.?));
-    op.ok = result.*.added;
-    op.app.postViewOp(op);
-}
-
 fn removeViewCallback(result: [*c]const c.FlutterRemoveViewResult) callconv(.c) void {
     if (result == null or result.*.user_data == null) return;
     const op: *ViewOp = @ptrCast(@alignCast(result.*.user_data.?));
@@ -1724,10 +1692,10 @@ pub fn rendererConfig(vk_ctx: *vulkan.Context) c.FlutterRendererConfig {
 
 /// Resolve the view a Wayland surface belongs to. `Input` uses this for keyboard
 /// focus and pointer routing.
-pub fn viewForSurface(user_data: ?*anyopaque, surface: *wl.Surface) ?engine.ViewId {
+pub fn viewForSurface(user_data: ?*anyopaque, surface: *wl.Surface) ?*View {
     const app: *App = @ptrCast(@alignCast(user_data.?));
     const view = app.views_by_surface.get(surface) orelse return null;
-    return view.id;
+    return view;
 }
 
 /// The buffer scale of the view that owns `surface`, for pointer events. The
@@ -1767,7 +1735,7 @@ pub fn vsyncCallback(user_data: ?*anyopaque, baton: isize) callconv(.c) void {
     const app: *App = @ptrCast(@alignCast(user_data.?));
     // Set before the engine is initialized, so this is never null while it can
     // be called; it is only cleared once the engine is being torn down.
-    const eng = app.engine.load(.acquire) orelse return;
+    const eng = app.engine orelse return;
     eng.requestVsync(baton);
 }
 
@@ -1822,56 +1790,6 @@ fn runAdoptViewMetrics(user_data: ?*anyopaque) void {
         view.win.metricsConstraints(),
     );
     app.ctx.eng.scheduleFrame();
-}
-
-const CreateWindowRequest = struct {
-    app: *App,
-    width: u32,
-    height: u32,
-};
-
-pub fn onCreateWindow(user_data: ?*anyopaque, width: u32, height: u32) void {
-    const app: *App = @ptrCast(@alignCast(user_data.?));
-    const req = std.heap.c_allocator.create(CreateWindowRequest) catch return;
-    req.* = .{ .app = app, .width = width, .height = height };
-    app.ctx.eng.postMainTask(runCreateWindow, req);
-}
-
-fn runCreateWindow(user_data: ?*anyopaque) void {
-    const req: *CreateWindowRequest = @ptrCast(@alignCast(user_data.?));
-    defer std.heap.c_allocator.destroy(req);
-    _ = req.app.spawnView(req.width, req.height) catch |err| {
-        std.debug.print("filo: could not create window: {}\n", .{err});
-    };
-}
-
-const CloseWindowRequest = struct {
-    app: *App,
-    view_id: engine.ViewId,
-};
-
-pub fn onCloseWindow(user_data: ?*anyopaque, view_id: engine.ViewId) void {
-    const app: *App = @ptrCast(@alignCast(user_data.?));
-    const req = std.heap.c_allocator.create(CloseWindowRequest) catch return;
-    req.* = .{ .app = app, .view_id = view_id };
-    app.ctx.eng.postMainTask(runCloseWindow, req);
-}
-
-fn runCloseWindow(user_data: ?*anyopaque) void {
-    const req: *CloseWindowRequest = @ptrCast(@alignCast(user_data.?));
-    defer std.heap.c_allocator.destroy(req);
-
-    const view = req.app.viewForId(req.view_id) orelse return;
-    if (view.id == 0) {
-        // The implicit view cannot be removed; closing its window exits.
-        req.app.ctx.loop.stop();
-        return;
-    }
-    switch (view.engine_state) {
-        .adding => view.close_after_add = true,
-        .added => view.win.closing = true,
-        .add_failed, .removing, .remove_failed => {},
-    }
 }
 
 const CursorRequest = struct {

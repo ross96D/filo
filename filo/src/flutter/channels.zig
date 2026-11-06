@@ -75,7 +75,7 @@ pub const windows = Channel{ .name = "filo/windows", .codec = .json_method };
 pub const accessibility = Channel{ .name = "flutter/accessibility", .codec = .standard_message };
 
 /// The handler that answers a channel's messages.
-pub const Handler = enum { text_input, platform, windows, mouse_cursor };
+pub const Handler = enum { text_input, platform, mouse_cursor };
 
 /// What to do with a message that arrives on a channel: which handler answers
 /// it, and the codec the framework decodes the reply with.
@@ -92,7 +92,6 @@ pub const Route = struct {
 pub const routes = [_]table.Entry(Route){
     .{ .name = text_input.name, .value = .{ .handler = .text_input, .codec = text_input.codec } },
     .{ .name = platform.name, .value = .{ .handler = .platform, .codec = platform.codec } },
-    .{ .name = windows.name, .value = .{ .handler = .windows, .codec = windows.codec } },
     .{ .name = mouse_cursor.name, .value = .{ .handler = .mouse_cursor, .codec = mouse_cursor.codec } },
     .{ .name = navigation.name, .value = .{ .codec = navigation.codec } },
     .{ .name = skia.name, .value = .{ .codec = skia.codec } },
@@ -114,10 +113,6 @@ test "routes carry the handler and codec of each channel the framework sends" {
     const platform_route = routes_table.get(platform.name).?;
     try testing.expectEqual(Handler.platform, platform_route.handler.?);
     try testing.expectEqual(Codec.json_method, platform_route.codec);
-
-    const windows_route = routes_table.get(windows.name).?;
-    try testing.expectEqual(Handler.windows, windows_route.handler.?);
-    try testing.expectEqual(Codec.json_method, windows_route.codec);
 
     // The mouse cursor channel is implemented and speaks `StandardMethodCodec`.
     const mouse_cursor_route = routes_table.get(mouse_cursor.name).?;

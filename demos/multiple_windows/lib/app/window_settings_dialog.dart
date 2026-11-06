@@ -4,6 +4,7 @@
 
 // ignore_for_file: invalid_use_of_internal_member
 
+import 'package:filo_windowing/filo_windowing.dart';
 import 'package:flutter/material.dart';
 // ignore: implementation_imports
 import 'package:flutter/src/widgets/_window_positioner.dart';
@@ -16,9 +17,11 @@ Future<void> showWindowSettingsDialog(BuildContext context, WindowSettings setti
     // force to set a size
     fullscreenDialog: true,
     builder: (BuildContext ctx) {
-      return _WindowSettingsEditor(
-        settings: settings,
-        onClose: () => Navigator.of(context, rootNavigator: true).pop(),
+      return FiloWindowShell(
+        child: _WindowSettingsEditor(
+          settings: settings,
+          onClose: () => Navigator.of(context, rootNavigator: true).pop(),
+        ),
       );
     },
   );

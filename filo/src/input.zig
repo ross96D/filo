@@ -7,6 +7,7 @@ const wl = wayland.client.wl;
 const engine = @import("engine.zig");
 const keyboard = @import("flutter/keyboard.zig");
 const text_input = @import("flutter/text_input.zig");
+const app_mod = @import("app.zig");
 
 const CONTEXT_NO_FLAGS: xkb.enum_xkb_context_flags = @intCast(xkb.XKB_CONTEXT_NO_FLAGS);
 const KEYMAP_FORMAT_TEXT_V1: xkb.enum_xkb_keymap_format = @intCast(xkb.XKB_KEYMAP_FORMAT_TEXT_V1);
@@ -44,7 +45,7 @@ pub const Input = struct {
     /// The view that last received platform keyboard focus, if any.
     focused_view: ?engine.ViewId,
     resolve_ctx: ?*anyopaque = null,
-    resolve_fn: ?*const fn (?*anyopaque, *wl.Surface) ?engine.ViewId = null,
+    resolve_fn: ?*const fn (?*anyopaque, *wl.Surface) ?*app_mod.View = null,
     /// The surface the pointer is over, so each event can ask its view for the
     /// buffer scale. Wayland positions are surface-local/logical; the Flutter
     /// embedder expects physical pixels.
@@ -75,7 +76,7 @@ pub const Input = struct {
     pub fn setViewResolver(
         self: *Input,
         ctx: ?*anyopaque,
-        resolve: *const fn (?*anyopaque, *wl.Surface) ?engine.ViewId,
+        resolve: *const fn (?*anyopaque, *wl.Surface) ?*app_mod.View,
     ) void {
         self.resolve_ctx = ctx;
         self.resolve_fn = resolve;
@@ -99,7 +100,7 @@ pub const Input = struct {
         return if (ratio > 0) ratio else 1.0;
     }
 
-    fn viewForSurface(self: *Input, surface: ?*wl.Surface) ?engine.ViewId {
+    fn viewForSurface(self: *Input, surface: ?*wl.Surface) ?*app_mod.View {
         const s = surface orelse return null;
         const resolve = self.resolve_fn orelse return null;
         return resolve(self.resolve_ctx, s);
@@ -115,14 +116,14 @@ pub const Input = struct {
     /// platform focus. Sent once per transition; the compositor can repeat an
     /// enter without an intervening leave.
     pub fn keyboardEnter(self: *Input, surface: ?*wl.Surface) void {
-        const view_id = self.viewForSurface(surface) orelse return;
+        const view = self.viewForSurface(surface) orelse return;
 
         if (self.focused_view) |previous| {
-            if (previous == view_id) return;
+            if (previous == view.id) return;
             self.eng.sendViewFocusEvent(previous, .unfocused, .none);
         }
-        self.focused_view = view_id;
-        self.eng.sendViewFocusEvent(view_id, .focused, .none);
+        self.focused_view = view.id;
+        self.eng.sendViewFocusEvent(view.id, .focused, .none);
     }
 
     /// The seat's keyboard left the surface: the view no longer has platform
@@ -192,7 +193,7 @@ pub const Input = struct {
 
     pub fn pointerEnter(self: *Input, surface: ?*wl.Surface, x: f64, y: f64) void {
         self.pointer_surface = surface;
-        if (self.viewForSurface(surface)) |view_id| self.pointer_view = view_id;
+        if (self.viewForSurface(surface)) |view| self.pointer_view = view.id;
         self.mouse_x = x;
         self.mouse_y = y;
         self.sendPointer(c.kAdd, 0, 0, 0, c.kFlutterPointerSignalKindNone);

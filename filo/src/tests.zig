@@ -22,7 +22,6 @@ test {
     _ = @import("flutter/text_input.zig");
     _ = @import("flutter/types/mouse_cursor.zig");
     _ = @import("flutter/types/text_input.zig");
-    _ = @import("flutter/window_manager.zig");
     _ = @import("vulkan.zig");
     _ = @import("wayland/window.zig");
     _ = @import("windowing.zig");

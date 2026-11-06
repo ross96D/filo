@@ -21,7 +21,6 @@ const vulkan = @import("vulkan.zig");
 const input = @import("input.zig");
 const text_input = @import("flutter/text_input.zig");
 const platform_handler = @import("flutter/platform_handler.zig");
-const window_manager = @import("flutter/window_manager.zig");
 const mouse_cursor = @import("flutter/mouse_cursor.zig");
 const platform_channel = @import("flutter/platform_channel.zig");
 const windowing = @import("windowing.zig");
@@ -48,7 +47,6 @@ pub const Runtime = struct {
     ti: text_input.TextInput = undefined,
     inp: input.Input = undefined,
     ph: platform_handler.PlatformHandler = undefined,
-    wm: window_manager.WindowManager = undefined,
     mc: mouse_cursor.MouseCursor = undefined,
 
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -190,6 +188,7 @@ pub const Runtime = struct {
         self.app = .{
             .ctx = undefined,
             .vk = &self.vk,
+            .engine = null,
             .channels = platform_channel.Registry.init(),
         };
         errdefer {
@@ -218,12 +217,12 @@ pub const Runtime = struct {
             &renderer,
             &self.app.compositor,
             &self.app,
-            &self.app.engine,
             app_mod.platformMessageCallback,
             app_mod.onPreEngineRestart,
             app_mod.vsyncCallback,
             app_mod.viewFocusChangeRequestCallback,
         );
+        self.app.engine = eng;
         var windowing_installed = false;
         errdefer {
             eng.deinit(allocator);
@@ -272,14 +271,6 @@ pub const Runtime = struct {
         errdefer self.ph.deinit();
         self.ph.attach();
         self.app.channels.platform = &self.ph;
-
-        self.wm = .{
-            .eng = eng,
-            .user_data = &self.app,
-            .create = app_mod.onCreateWindow,
-            .close = app_mod.onCloseWindow,
-        };
-        self.app.channels.windows = &self.wm;
 
         self.mc = .{
             .eng = eng,
@@ -345,6 +336,7 @@ pub const Runtime = struct {
 
         const eng = self.app.ctx.eng;
         eng.deinit(self.allocator);
+        self.app.engine = null;
         windowing.uninstall();
 
         // The embedder published this while the engine was alive; it is stale

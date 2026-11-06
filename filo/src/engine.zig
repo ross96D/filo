@@ -124,19 +124,6 @@ fn windowMetrics(
     };
 }
 
-fn viewFocusEvent(
-    view_id: ViewId,
-    state: ViewFocusState,
-    direction: ViewFocusDirection,
-) c.FlutterViewFocusEvent {
-    return .{
-        .struct_size = @sizeOf(c.FlutterViewFocusEvent),
-        .view_id = view_id,
-        .state = @backingInt(state),
-        .direction = @backingInt(direction),
-    };
-}
-
 pub const Engine = struct {
     lib: std.DynLib,
     procs: c.FlutterEngineProcTable,
@@ -158,10 +145,6 @@ pub const Engine = struct {
     /// How far apart display refreshes are. Set by the window once it knows,
     /// which is also what the timestamps handed back use.
     frame_period_ns: u64 = default_frame_period_ns,
-    /// Where `main` keeps the engine pointer the vsync callback reaches it by.
-    /// Cleared at teardown so a late callback cannot touch freed memory; the
-    /// callback reads it from another thread, hence the atomic.
-    self_slot: *std.atomic.Value(?*Engine),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -172,10 +155,6 @@ pub const Engine = struct {
         /// drawing straight into the swapchain.
         compositor: *const c.FlutterCompositor,
         user_data: ?*anyopaque,
-        /// Filled in before the engine is initialized: the vsync callback runs on
-        /// the raster thread and reaches the engine through this slot, and the
-        /// engine can ask for a frame before `init` has returned.
-        self_slot: *std.atomic.Value(?*Engine),
         platform_message_callback: c.FlutterPlatformMessageCallback,
         /// Called on a hot restart, before the Dart isolate is torn down. The
         /// embedder uses it to drop the callbacks that belong to that isolate.
@@ -196,10 +175,7 @@ pub const Engine = struct {
             .task_runner = undefined,
             .task_runner_description = undefined,
             .custom_task_runners = undefined,
-            .self_slot = self_slot,
         };
-        self_slot.*.store(self, .release);
-        errdefer self_slot.*.store(null, .release);
 
         self.lib = std.DynLib.open(cfg.engine_lib) catch |err| {
             std.debug.print("error dlopen {s}: {}\n", .{ cfg.engine_lib, err });
@@ -370,7 +346,7 @@ pub const Engine = struct {
             .add_view_callback = callback,
         };
         const result = self.procs.AddView.?(self.handle, &info);
-        if (result != 0) return error.AddViewFailed;
+        if (result != c.kSuccess) return error.AddViewFailed;
     }
 
     /// Remove a view. The callback is required and asynchronous: the view's
@@ -392,7 +368,7 @@ pub const Engine = struct {
             .remove_view_callback = callback,
         };
         const result = self.procs.RemoveView.?(self.handle, &info);
-        if (result != 0) return error.RemoveViewFailed;
+        if (result != c.kSuccess) return error.RemoveViewFailed;
     }
 
     /// Tell the engine that a view gained or lost platform (keyboard) focus.
@@ -403,9 +379,14 @@ pub const Engine = struct {
         state: ViewFocusState,
         direction: ViewFocusDirection,
     ) void {
-        var event = viewFocusEvent(view_id, state, direction);
+        var event = c.FlutterViewFocusEvent{
+            .struct_size = @sizeOf(c.FlutterViewFocusEvent),
+            .view_id = view_id,
+            .state = @backingInt(state),
+            .direction = @backingInt(direction),
+        };
         const result = self.procs.SendViewFocusEvent.?(self.handle, &event);
-        if (result != 0) {
+        if (result != c.kSuccess) {
             std.debug.print("filo: SendViewFocusEvent failed: {}\n", .{result});
         }
     }
@@ -488,7 +469,7 @@ pub const Engine = struct {
             displays[0..].ptr,
             displays.len,
         );
-        if (result != 0) std.debug.print("filo: NotifyDisplayUpdate failed: {}\n", .{result});
+        if (result != c.kSuccess) std.debug.print("filo: NotifyDisplayUpdate failed: {}\n", .{result});
     }
 
     pub fn sendPointerEvent(self: *Engine, event: *const c.FlutterPointerEvent) void {
@@ -508,7 +489,7 @@ pub const Engine = struct {
             .response_handle = null,
         };
         const result = self.procs.SendPlatformMessage.?(self.handle, &msg);
-        if (result != 0) {
+        if (result != c.kSuccess) {
             std.debug.print("filo: SendPlatformMessage failed: {}\n", .{result});
         }
     }
@@ -583,9 +564,6 @@ pub const Engine = struct {
         // treat the last one as a tick that has already happened.
         const now = self.currentTime();
         self.fireVsync(now, now + self.frame_period_ns);
-        // Anything the engine asks for from here on cannot be answered; it must
-        // not reach a freed engine either.
-        self.self_slot.*.store(null, .release);
 
         _ = self.procs.Shutdown.?(self.handle);
         if (self.aot_data != null) {
@@ -622,12 +600,4 @@ test "window metrics carry loose constraints when requested" {
     try std.testing.expectEqual(@as(usize, 1), metrics.min_height_constraint);
     try std.testing.expectEqual(@as(usize, 16_384), metrics.max_width_constraint);
     try std.testing.expectEqual(@as(usize, 16_384), metrics.max_height_constraint);
-}
-
-test "view focus events carry the view, state and direction" {
-    const event = viewFocusEvent(7, .focused, .backward);
-    try std.testing.expectEqual(@as(ViewId, 7), event.view_id);
-    try std.testing.expectEqual(@as(c.FlutterViewFocusState, @intCast(c.kFocused)), event.state);
-    try std.testing.expectEqual(@as(c.FlutterViewFocusDirection, @intCast(c.kBackward)), event.direction);
-    try std.testing.expectEqual(@as(usize, @sizeOf(c.FlutterViewFocusEvent)), event.struct_size);
 }

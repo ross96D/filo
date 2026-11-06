@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:filo_windowing/filo_windowing.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/src/widgets/_window.dart';
+import 'package:flutter/src/widgets/_window_positioner.dart';
 
 void main() {
   final owner = installFiloWindowing();
@@ -25,6 +26,7 @@ class WindowHost extends StatefulWidget {
 class _WindowHostState extends State<WindowHost> {
   final List<RegularWindowController> _windows = <RegularWindowController>[];
   FiloLayerWindowController? _layer;
+  PopupWindowController? _popup;
 
   @override
   void initState() {
@@ -50,6 +52,27 @@ class _WindowHostState extends State<WindowHost> {
   void _removeWindow(RegularWindowController controller) {
     if (!mounted) return;
     setState(() => _windows.remove(controller));
+  }
+
+  void _showPopup() {
+    final current = _popup;
+    if (current != null) {
+      setState(() => _popup = null);
+      current.destroy();
+      return;
+    }
+
+    final controller = PopupWindowController(
+      delegate: _PopupDelegate(() {
+        if (!mounted) return;
+        setState(() => _popup = null);
+      }),
+      anchorRect: Rect.fromLTWH(0, 0, 200, 200),
+      constraints: BoxConstraints.tight(Size(200, 200)),
+      parent: _windows.first,
+      positioner: WindowPositioner(),
+    );
+    setState(() => _popup = controller);
   }
 
   void _toggleLayer() {
@@ -91,6 +114,7 @@ class _WindowHostState extends State<WindowHost> {
               index: _windows.indexOf(controller) + 1,
               onNewWindow: _addWindow,
               onToggleLayer: _toggleLayer,
+              onShowPopup: _showPopup,
               onClose: controller.destroy,
             ),
           ),
@@ -99,6 +123,21 @@ class _WindowHostState extends State<WindowHost> {
             controller: layer,
             child: LayerPanel(onClose: _toggleLayer),
           ),
+        if (_popup case final popup?)
+          PopupWindow(
+            controller: popup,
+            child: MaterialApp(
+              debugShowCheckedModeBanner: false,
+              home: SizedBox(
+                height: 200,
+                width: 200,
+                child: Material(
+                  color: Color.fromARGB(0xFF, 0xDD, 0xDD, 0xDD),
+                  child: TextFormField(decoration: const InputDecoration(labelText: 'X')),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -106,6 +145,15 @@ class _WindowHostState extends State<WindowHost> {
 
 class _LayerDelegate with RegularWindowControllerDelegate {
   _LayerDelegate(this.onDestroyed);
+
+  final VoidCallback onDestroyed;
+
+  @override
+  void onWindowDestroyed() => onDestroyed();
+}
+
+class _PopupDelegate with PopupWindowControllerDelegate {
+  _PopupDelegate(this.onDestroyed);
 
   final VoidCallback onDestroyed;
 
@@ -135,10 +183,7 @@ class LayerPanel extends StatelessWidget {
               spacing: 10,
               mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
-                const Text(
-                  'Layer surface',
-                  style: TextStyle(color: Colors.white, fontSize: 20),
-                ),
+                const Text('Layer surface', style: TextStyle(color: Colors.white, fontSize: 20)),
                 const Text(
                   'top layer, anchored top-right',
                   style: TextStyle(color: Colors.white70, fontSize: 12),
@@ -172,12 +217,14 @@ class WindowApp extends StatelessWidget {
     required this.index,
     required this.onNewWindow,
     required this.onToggleLayer,
+    required this.onShowPopup,
     required this.onClose,
   });
 
   final int index;
   final VoidCallback onNewWindow;
   final VoidCallback onToggleLayer;
+  final VoidCallback onShowPopup;
   final VoidCallback onClose;
 
   @override
@@ -195,20 +242,13 @@ class WindowApp extends StatelessWidget {
               Text('view id: ${View.of(context).viewId}'),
               Text('size: ${size.width.round()} × ${size.height.round()}'),
               const SizedBox(height: 20),
-              FilledButton(
-                onPressed: onNewWindow,
-                child: const Text('New window'),
-              ),
+              FilledButton(onPressed: onNewWindow, child: const Text('New window')),
               const SizedBox(height: 8),
-              OutlinedButton(
-                onPressed: onToggleLayer,
-                child: const Text('Toggle layer panel'),
-              ),
+              OutlinedButton(onPressed: onToggleLayer, child: const Text('Toggle layer panel')),
               const SizedBox(height: 8),
-              OutlinedButton(
-                onPressed: onClose,
-                child: const Text('Close window'),
-              ),
+              OutlinedButton(onPressed: onShowPopup, child: const Text('Show popup')),
+              const SizedBox(height: 8),
+              OutlinedButton(onPressed: onClose, child: const Text('Close window')),
             ],
           ),
         ),

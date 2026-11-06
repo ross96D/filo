@@ -15,11 +15,7 @@ import 'controllers.dart';
 /// Descendants can reach the controller through
 /// `WindowScope.of(context) as FiloLayerWindowController`.
 class FiloLayerWindow extends StatelessWidget {
-  const FiloLayerWindow({
-    super.key,
-    required this.controller,
-    required this.child,
-  });
+  const FiloLayerWindow({super.key, required this.controller, required this.child});
 
   /// The controller that owns the native layer surface.
   final FiloLayerWindowController controller;
@@ -34,6 +30,30 @@ class FiloLayerWindow extends StatelessWidget {
       builder: (BuildContext context, Widget? widget) => WindowScope(
         controller: controller,
         child: View(view: controller.rootView, child: child),
+      ),
+    );
+  }
+}
+
+/// Adds the default shortcuts to a window without WidgetsApp
+class FiloWindowShell extends StatelessWidget {
+  final Map<ShortcutActivator, Intent>? shortcuts;
+
+  final Map<Type, Action<Intent>>? actions;
+
+  final Widget child;
+
+  const FiloWindowShell({super.key, this.shortcuts, this.actions, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Shortcuts(
+      shortcuts: shortcuts ?? WidgetsApp.defaultShortcuts,
+      child: DefaultTextEditingShortcuts(
+        child: Actions(
+          actions: actions ?? WidgetsApp.defaultActions,
+          child: child,
+        ),
       ),
     );
   }

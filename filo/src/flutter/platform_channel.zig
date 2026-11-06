@@ -7,7 +7,6 @@ const codec = @import("codec.zig");
 const table = @import("table.zig");
 const text_input = @import("text_input.zig");
 const platform_handler = @import("platform_handler.zig");
-const window_manager = @import("window_manager.zig");
 const mouse_cursor = @import("mouse_cursor.zig");
 
 /// Routes the platform messages the framework sends to the handler for their
@@ -21,7 +20,6 @@ pub const Registry = struct {
     eng: ?*engine.Engine = null,
     text_input: ?*text_input.TextInput = null,
     platform: ?*platform_handler.PlatformHandler = null,
-    windows: ?*window_manager.WindowManager = null,
     mouse_cursor: ?*mouse_cursor.MouseCursor = null,
     /// Channel name → route, built from `channels.routes`.
     routes: table.CompiletimeTable(channels.Route),
@@ -64,13 +62,6 @@ pub const Registry = struct {
                     return;
                 };
                 platform.handlePlatformMessage(message);
-            },
-            .windows => {
-                const windows = self.windows orelse {
-                    notReady(eng, route.codec, response_handle, "window manager");
-                    return;
-                };
-                windows.handlePlatformMessage(message);
             },
             .mouse_cursor => {
                 const cursor = self.mouse_cursor orelse {
